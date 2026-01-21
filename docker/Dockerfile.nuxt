@@ -1,0 +1,33 @@
+# docker/Dockerfile.nuxt
+# Nuxt.js Frontend for Library RAG System
+
+FROM node:20-alpine AS builder
+
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# package.json 복사 및 의존성 설치
+COPY frontend/package*.json ./
+RUN npm ci
+
+# 소스 코드 복사
+COPY frontend/ ./
+
+# 빌드
+RUN npm run build
+
+# Production 이미지
+FROM node:20-alpine
+
+WORKDIR /app
+
+# 빌드된 파일만 복사
+COPY --from=builder /app/.output /app/.output
+
+# 환경 변수
+ENV NUXT_HOST=0.0.0.0
+ENV NUXT_PORT=3000
+
+EXPOSE 3000
+
+CMD ["node", ".output/server/index.mjs"]
