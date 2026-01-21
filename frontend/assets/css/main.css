@@ -1,0 +1,70 @@
+/* assets/css/main.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary-color: #4f46e5;
+  --secondary-color: #10b981;
+  --background: #ffffff;
+  --foreground: #1f2937;
+}
+
+body {
+  @apply bg-gray-50 text-gray-900;
+}
+
+/* 커스텀 스크롤바 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-100;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-300 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-400;
+}
+
+/* 애니메이션 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* 검색 결과 하이라이트 */
+.search-highlight {
+  @apply bg-yellow-200 px-1 rounded;
+}
+
+/* 로딩 스피너 */
+.spinner {
+  border: 3px solid rgba(79, 70, 229, 0.1);
+  border-top-color: rgba(79, 70, 229, 1);
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
