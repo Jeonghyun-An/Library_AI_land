@@ -90,8 +90,9 @@ cd library-rag-system
 cp .env.example .env
 # .env 파일 편집 (HuggingFace 토큰 등)
 
-# 3. Docker 네트워크 생성
-docker network create ragnet
+# 3 볼륨 및 네트워크 설정 (Windows PowerShell)
+cd docker
+.\setup-volumes.ps1
 
 # 4. 서비스 시작
 cd docker
