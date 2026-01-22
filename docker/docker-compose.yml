@@ -1,6 +1,11 @@
 # docker/docker-compose.yml
-# 도서관 지식검색 RAG 시스템 - A4000 16GB 최적화
+# 도서관 지식검색 RAG 시스템
+
 version: "3.9"
+
+x-ragnet-network: &ragnet
+  networks:
+    - library-ragnet
 
 services:
   # ========== 메타데이터 저장소 (etcd) ==========
@@ -8,22 +13,22 @@ services:
     image: quay.io/coreos/etcd:v3.5.0
     container_name: library-etcd
     environment:
-      - ETCD_AUTO_COMPACTION_RETENTION=1
-      - ETCD_QUOTA_BACKEND_BYTES=4294967296
-      - ETCD_SNAPSHOT_COUNT=50000
-      - ETCD_ENABLE_V2=true
-      - ETCD_LOG_LEVEL=info
-      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
-      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
-      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
-      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
-      - ETCD_INITIAL_CLUSTER=default=http://etcd:2380
-      - ETCD_NAME=default
-      - ETCDCTL_API=3
+      ETCD_DATA_DIR: "/etcd"
+      ETCD_AUTO_COMPACTION_RETENTION: "1"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+      ETCD_ENABLE_V2: "true"
+      ETCD_LOG_LEVEL: "info"
+      ETCD_LISTEN_CLIENT_URLS: "http://0.0.0.0:2379"
+      ETCD_ADVERTISE_CLIENT_URLS: "http://etcd:2379"
+      ETCD_LISTEN_PEER_URLS: "http://0.0.0.0:2380"
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: "http://etcd:2380"
+      ETCD_INITIAL_CLUSTER: "default=http://etcd:2380"
+      ETCD_NAME: "default"
+      ETCDCTL_API: "3"
     volumes:
-      - etcd_data:/etcd
-    networks:
-      - ragnet
+      - library_etcd_data:/etcd
+    <<: *ragnet
     healthcheck:
       test:
         [
@@ -33,8 +38,8 @@ services:
           "health",
           "--endpoints=http://127.0.0.1:2379",
         ]
-      interval: 10s
-      timeout: 5s
+      interval: 5s
+      timeout: 3s
       retries: 10
     restart: unless-stopped
 
@@ -44,19 +49,18 @@ services:
     container_name: library-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
     volumes:
-      - minio_data:/data
-    networks:
-      - ragnet
+      - library_minio_data:/data
     ports:
-      - "9001:9001" # MinIO 콘솔
+      - "9001:9001"
+    <<: *ragnet
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
 
   # ========== 벡터 데이터베이스 (Milvus) ==========
@@ -65,26 +69,26 @@ services:
     container_name: library-milvus
     command: ["milvus", "run", "standalone"]
     environment:
-      - ETCD_ENDPOINTS=etcd:2379
-      - MINIO_ADDRESS=minio:9000
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - MINIO_USE_SSL=false
-      - MINIO_BUCKET_NAME=library-bucket
+      ETCD_ENDPOINTS: "etcd:2379"
+      MINIO_ADDRESS: "minio:9000"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET_NAME: "library-bucket"
     volumes:
-      - milvus_data:/var/lib/milvus
-    networks:
-      - ragnet
+      - library_milvus_data:/var/lib/milvus
     depends_on:
       etcd:
         condition: service_healthy
       minio:
         condition: service_healthy
+    <<: *ragnet
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:9091/healthz"]
       interval: 10s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 120s
     restart: unless-stopped
 
   # ========== LLM 서버 (vLLM - A4000 최적화) ==========
@@ -98,34 +102,31 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    networks:
-      - ragnet
+    <<: *ragnet
     environment:
-      # HuggingFace 토큰
       HUGGINGFACE_HUB_TOKEN: ${HUGGINGFACE_TOKEN}
       HF_TOKEN: ${HUGGINGFACE_TOKEN}
       HF_HOME: "/models"
-      # A4000 최적화 설정
       CUDA_VISIBLE_DEVICES: "0"
       TRANSFORMERS_OFFLINE: "0"
-      VLLM_USE_FLASHINFER: "0" # A4000에서는 비활성화
+      VLLM_USE_FLASHINFER: "0"
     volumes:
       - ../models/.hf-cache:/models:rw
     command:
       - --model
-      - meta-llama/Llama-3.2-3B-Instruct # 3B - A4000에 최적
+      - meta-llama/Llama-3.2-3B-Instruct
       - --served-model-name
       - llama-3.2-3b
       - --download-dir
       - /models
       - --max-model-len
-      - "4096" # 컨텍스트 윈도우 (A4000 16GB 고려)
+      - "4096"
       - --dtype
-      - float16 # A4000은 fp16 사용
+      - float16
       - --gpu-memory-utilization
-      - "0.85" # 메모리 활용률 (안전하게 85%)
+      - "0.85"
       - --max-num-seqs
-      - "8" # 동시 배치 크기
+      - "8"
       - --port
       - "8000"
       - --host
@@ -133,11 +134,10 @@ services:
     ports:
       - "18080:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
-      interval: 15s
-      timeout: 10s
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v1/models"]
+      interval: 10s
+      timeout: 5s
       retries: 30
-      start_period: 120s
     restart: unless-stopped
 
   # ========== FastAPI 백엔드 ==========
@@ -156,93 +156,41 @@ services:
     volumes:
       - ..:/app
       - ../models/.hf-cache:/models
-    networks:
-      - ragnet
+    <<: *ragnet
     environment:
-      # 시스템 설정
       IS_DOCKER: "true"
       PYTHONUNBUFFERED: "1"
-
-      # GPU 설정
       CUDA_VISIBLE_DEVICES: "0"
 
-      # MinIO 연결
       MINIO_ENDPOINT: "minio:9000"
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_SECURE: "false"
       MINIO_BUCKET: "library-bucket"
 
-      # 외부 접근용 MinIO 설정
-      MINIO_PRESIGN_SCHEME: "http"
-      MINIO_PRESIGN_HOST: "localhost"
-      MINIO_PRESIGN_PORT: "9000"
-      MINIO_PRESIGN_PATH_PREFIX: "/minio"
-
-      # Milvus 연결
       MILVUS_HOST: "milvus"
       MILVUS_PORT: "19530"
       MILVUS_COLLECTION: "library_books"
 
-      # vLLM 연결
       VLLM_BASE_URL: "http://vllm-a4000:8000"
 
-      # Milvus 스키마 설정
-      MILVUS_SECTION_MAX: "512"
-      MILVUS_DOCID_MAX: "256"
-      MILVUS_CHUNK_MAX: "8192"
-
-      # Milvus 인덱스 파라미터 (A4000 최적화)
-      MILVUS_INDEX_TYPE: "HNSW"
-      MILVUS_METRIC_TYPE: "IP" # Inner Product (Cosine)
-      MILVUS_HNSW_M: "16" # HNSW 연결 수 (메모리 절약)
-      MILVUS_HNSW_EFCON: "200" # 구축시 탐색 범위
-      MILVUS_EF_SEARCH: "256" # 검색시 탐색 범위
-
-      # RAG 청킹 설정 (A4000 최적화)
-      RAG_TARGET_TOKENS: "512" # 청킹 목표 (A4000 메모리 고려)
-      RAG_OVERLAP_TOKENS: "64" # 오버랩
-      RAG_MIN_CHUNK_TOKENS: "100" # 최소 크기
-      RAG_CHUNK_TOKENS: "512"
-      RAG_CHUNK_OVERLAP: "64"
-
-      # 도서 특화 청킹 설정
-      RAG_ENABLE_BOOK_CHUNKER: "1" # 도서 청커 활성화
-      RAG_BOOK_TARGET_TOKENS: "512" # 도서 청크 크기
-      RAG_PRESERVE_CHAPTERS: "1" # 챕터 구조 보존
-      RAG_EXTRACT_TOC: "1" # 목차 추출
-      RAG_LINK_FOOTNOTES: "1" # 각주 연결
-
-      # 레이아웃 청킹 설정
-      RAG_ENABLE_LAYOUT_CHUNKER: "1"
-      RAG_PARSE_LAYOUT: "1"
-      RAG_PARSE_LAYOUT_MIN_CHARS: "100"
-      RAG_PARSE_LAYOUT_MAX_TOKENS: "512"
-
-      # 검색 설정
-      RAG_TOPK_INIT: "40" # 초기 후보 수 (메모리 절약)
-      RAG_SCORE_THRESHOLD: "0.3" # 리랭커 스코어 컷오프
-      RAG_CONTEXT_BUDGET_TOKENS: "2048" # 최대 컨텍스트 (A4000 고려)
-
-      # 하이브리드 검색
+      RAG_TARGET_TOKENS: "512"
+      RAG_OVERLAP_TOKENS: "64"
+      RAG_MIN_CHUNK_TOKENS: "100"
+      RAG_TOPK_INIT: "40"
+      RAG_SCORE_THRESHOLD: "0.3"
+      RAG_CONTEXT_BUDGET_TOKENS: "2048"
       RAG_USE_HYBRID: "1"
-      RAG_HYBRID_WEIGHT_VEC: "0.7" # 벡터:키워드 = 0.7:0.3
+      RAG_HYBRID_WEIGHT_VEC: "0.7"
 
-      # 임베딩 모델 설정
       EMBEDDING_MODEL_NAME: "BAAI/bge-m3"
-      EMBEDDING_BATCH_SIZE: "32" # A4000 메모리 고려
-      EMBEDDING_MAX_LENGTH: "512" # 청크 크기와 동일
+      EMBEDDING_BATCH_SIZE: "32"
+      EMBEDDING_MAX_LENGTH: "512"
 
-      # 리랭커 설정
       RERANKER_MODEL_NAME: "BAAI/bge-reranker-v2-m3"
       RERANKER_BATCH_SIZE: "16"
 
-      # 작업 상태 관리
-      RAG_JOB_STATE_PERSIST: "minio"
-
     depends_on:
-      milvus:
-        condition: service_healthy
       vllm-a4000:
         condition: service_healthy
     ports:
@@ -265,8 +213,7 @@ services:
       NITRO_HOST: "0.0.0.0"
       NITRO_PORT: "3000"
       PORT: "3000"
-    networks:
-      - ragnet
+    <<: *ragnet
     depends_on:
       - fastapi
     restart: unless-stopped
@@ -280,8 +227,7 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
     ports:
       - "90:80"
-    networks:
-      - ragnet
+    <<: *ragnet
     depends_on:
       - nuxt
       - fastapi
@@ -292,17 +238,20 @@ services:
       retries: 5
     restart: unless-stopped
 
-# ========== 볼륨 정의 ==========
+# ========== 볼륨 정의 (External) ==========
 volumes:
-  etcd_data:
-    driver: local
-  minio_data:
-    driver: local
-  milvus_data:
-    driver: local
+  library_etcd_data:
+    external: true
+    name: library_etcd_data
+  library_milvus_data:
+    external: true
+    name: library_milvus_data
+  library_minio_data:
+    external: true
+    name: library_minio_data
 
-# ========== 네트워크 정의 ==========
+# ========== 네트워크 정의 (External) ==========
 networks:
-  ragnet:
-    driver: bridge
+  library-ragnet:
+    external: true
     name: library-ragnet
