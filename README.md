@@ -57,12 +57,12 @@
 
 ### 3. **생성 모델**
 
-- **Llama-3.2-3B-Instruct** (A4000 최적화)
-- 질의 응답, 요약, 인용 생성
+- **google/gemma-3-4b-it** (A4000 최적화)
+- 질의 이해 및 응답 생성 + 이미지 이해
 
 ## 기술 스택
 
-- **LLM**: Llama-3.2-3B-Instruct (vLLM)
+- **LLM**: google/gemma-3-4b-it (vLLM)
 - **Embedding**: BAAI/bge-m3
 - **Reranker**: BAAI/bge-reranker-v2-m3
 - **Vector DB**: Milvus 2.2.11 (HNSW)
