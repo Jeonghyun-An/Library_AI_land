@@ -171,7 +171,7 @@ async def upload_book(
         raise HTTPException(status_code=500, detail=f"업로드 실패: {str(e)}")
 
 
-async def process_book_upload(file_path: str, doc_id: str, metadata: Dict, job_id: str):
+def process_book_upload(file_path: str, doc_id: str, metadata: Dict, job_id: str):
     """
     백그라운드 도서 처리 작업
     - 파싱, 청킹, 임베딩, 저장
@@ -281,44 +281,18 @@ async def process_book_upload(file_path: str, doc_id: str, metadata: Dict, job_i
         )
         
         # 5. Milvus에 저장
+        from app.services.milvus_service import get_collection
+
         print(f"[{job_id}] Step 5: Storing in vector DB...")
-        milvus_client = get_milvus_client()
         collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
-        
-        # 컬렉션 존재 확인 및 생성
-        from pymilvus import utility, Collection, CollectionSchema, FieldSchema, DataType
-        
-        if not utility.has_collection(collection_name):
-            # 스키마 정의
-            fields = [
-                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-                FieldSchema(name="doc_id", dtype=DataType.VARCHAR, max_length=256),
-                FieldSchema(name="chunk_text", dtype=DataType.VARCHAR, max_length=8192),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=1024),  # BGE-M3
-                FieldSchema(name="metadata", dtype=DataType.JSON),
-            ]
-            schema = CollectionSchema(fields=fields, description="Library books collection")
-            collection = Collection(name=collection_name, schema=schema)
-            
-            # 인덱스 생성
-            index_params = {
-                "metric_type": "IP",
-                "index_type": "HNSW",
-                "params": {"M": 16, "efConstruction": 200}
-            }
-            collection.create_index(field_name="embedding", index_params=index_params)
-            print(f"[{job_id}] Created collection: {collection_name}")
-        else:
-            collection = Collection(name=collection_name)
-        
-        # 데이터 삽입
+        collection = get_collection(collection_name, dim=1024)
+
         entities = [
-            [enriched_meta['doc_id'] for _, enriched_meta in enriched_chunks],  # doc_id
-            [chunk_text for chunk_text, _ in enriched_chunks],  # chunk_text
-            embeddings.tolist(),  # embedding
-            [enriched_meta for _, enriched_meta in enriched_chunks]  # metadata
+            [m['doc_id'] for _, m in enriched_chunks],
+            [t for t, _ in enriched_chunks],
+            embeddings.tolist(),
+            [m for _, m in enriched_chunks],
         ]
-        
         collection.insert(entities)
         collection.flush()
         
@@ -379,12 +353,10 @@ async def search_books(request: SearchRequest):
         query_embedding = emb_model.encode([request.query], normalize_embeddings=True)[0]
         
         # 2. Milvus 검색
-        milvus_client = get_milvus_client()
         collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
         
-        from pymilvus import Collection
-        collection = Collection(name=collection_name)
-        collection.load()
+        from app.services.milvus_service import get_collection
+        collection = get_collection(collection_name, dim=1024)
         
         # 검색 파라미터
         search_params = {
@@ -435,11 +407,8 @@ async def search_books(request: SearchRequest):
         # 4. 리랭킹 (선택)
         if request.use_reranking and len(results) > 0:
             try:
-                from FlagEmbedding import FlagReranker
-                reranker = FlagReranker(
-                    os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3"),
-                    use_fp16=True
-                )
+                from app.services.reranker_service import get_reranker
+                reranker = get_reranker()
                 
                 # 쿼리-문서 쌍 생성
                 pairs = [[request.query, r['chunk_text']] for r in results]
