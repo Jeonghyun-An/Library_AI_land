@@ -80,13 +80,12 @@ async def startup_event():
     except Exception as e:
         print(f"✗ MinIO initialization error: {e}")
     
-    # Milvus 연결 확인
     try:
-        from app.services.milvus_service import get_milvus_client
-        milvus_client = get_milvus_client()
-        print("✓ Milvus connection established")
+        from app.services.milvus_service import ensure_milvus_connected
+        ensure_milvus_connected()
+        print("✓ Milvus connection check OK")
     except Exception as e:
-        print(f"✗ Milvus connection error: {e}")
+        print(f"Milvus not ready yet (will retry on demand): {e}")
     
     # 임베딩 모델 로드
     try:
