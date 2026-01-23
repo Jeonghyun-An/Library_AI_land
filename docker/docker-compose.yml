@@ -1,7 +1,8 @@
 # docker/docker-compose.yml
-# 도서관 지식검색 RAG 시스템
-
-version: "3.9"
+# 도서관 지식검색 RAG 시스템 (Mock → Linux(H200) 이관 고려)
+# - external volume/network 사용
+# - MinIO bucket 자동 생성(minio-init)
+# - Milvus healthcheck 완화
 
 x-ragnet-network: &ragnet
   networks:
@@ -40,12 +41,13 @@ services:
         ]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 15
+      start_period: 20s
     restart: unless-stopped
 
   # ========== 객체 저장소 (MinIO) ==========
   minio:
-    image: minio/minio:RELEASE.2023-01-20T02-05-44Z
+    image: minio/minio:latest
     container_name: library-minio
     command: server /data --console-address ":9001"
     environment:
@@ -54,14 +56,39 @@ services:
     volumes:
       - library_minio_data:/data
     ports:
+      - "9000:9000"
       - "9001:9001"
     <<: *ragnet
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 30
+      start_period: 20s
     restart: unless-stopped
+
+  # ========== MinIO Bucket Init (library-bucket 자동 생성) ==========
+  # - Milvus가 버킷 없어서 내부 컴포넌트(DataCoord) 꼬이는 걸 방지
+  minio-init:
+    image: minio/mc:latest
+    container_name: library-minio-init
+    <<: *ragnet
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: "library-bucket"
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "
+      mc alias set myminio http://minio:9000 $${MINIO_ACCESS_KEY} $${MINIO_SECRET_KEY} &&
+      mc mb -p myminio/$${MINIO_BUCKET} || true &&
+      mc anonymous set none myminio/$${MINIO_BUCKET} || true &&
+      echo '[minio-init] bucket ensured: ' $${MINIO_BUCKET}
+      "
+    restart: "no"
 
   # ========== 벡터 데이터베이스 (Milvus) ==========
   milvus:
@@ -82,13 +109,15 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     <<: *ragnet
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9091/healthz"]
       interval: 10s
       timeout: 5s
-      retries: 30
-      start_period: 120s
+      retries: 60
+      start_period: 300s
     restart: unless-stopped
 
   # ========== LLM 서버 (vLLM - A4000 최적화) ==========
@@ -138,6 +167,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+      start_period: 60s
     restart: unless-stopped
 
   # ========== FastAPI 백엔드 ==========
@@ -171,6 +201,9 @@ services:
       MILVUS_HOST: "milvus"
       MILVUS_PORT: "19530"
       MILVUS_COLLECTION: "library_books"
+      MILVUS_CONNECT_TIMEOUT: "60"
+      MILVUS_CONNECT_RETRIES: "10"
+      MILVUS_CONNECT_BACKOFF: "1.0"
 
       VLLM_BASE_URL: "http://vllm-a4000:8000"
 
@@ -189,17 +222,21 @@ services:
 
       RERANKER_MODEL_NAME: "BAAI/bge-reranker-v2-m3"
       RERANKER_BATCH_SIZE: "16"
-
     depends_on:
       vllm-a4000:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 20
+      start_period: 60s
     restart: unless-stopped
 
   # ========== Nuxt.js 프론트엔드 ==========
@@ -215,7 +252,8 @@ services:
       PORT: "3000"
     <<: *ragnet
     depends_on:
-      - fastapi
+      fastapi:
+        condition: service_healthy
     restart: unless-stopped
 
   # ========== Nginx 게이트웨이 ==========
@@ -229,13 +267,16 @@ services:
       - "90:80"
     <<: *ragnet
     depends_on:
-      - nuxt
-      - fastapi
+      nuxt:
+        condition: service_started
+      fastapi:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
 # ========== 볼륨 정의 (External) ==========
