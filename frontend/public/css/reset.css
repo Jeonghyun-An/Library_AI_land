@@ -1,0 +1,309 @@
+@charset "utf-8";
+a,
+abbr,
+acronym,
+address,
+applet,
+article,
+aside,
+audio,
+b,
+big,
+blockquote,
+body,
+canvas,
+caption,
+center,
+cite,
+code,
+dd,
+del,
+details,
+dfn,
+div,
+dl,
+dt,
+em,
+embed,
+fieldset,
+figcaption,
+figure,
+footer,
+form,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+header,
+hgroup,
+html,
+i,
+iframe,
+img,
+ins,
+kbd,
+label,
+legend,
+li,
+main,
+mark,
+menu,
+nav,
+object,
+ol,
+output,
+p,
+pre,
+q,
+ruby,
+s,
+samp,
+section,
+small,
+span,
+strike,
+strong,
+sub,
+summary,
+sup,
+table,
+tbody,
+td,
+tfoot,
+th,
+thead,
+time,
+tr,
+tt,
+u,
+ul,
+var,
+video {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    font-size: 101%;
+    vertical-align: baseline;
+}
+
+a {
+    text-decoration: none;
+}
+
+article,
+aside,
+details,
+figcaption,
+figure,
+footer,
+header,
+hgroup,
+main,
+menu,
+nav,
+section {
+    display: block
+}
+
+[hidden] {
+    display: none
+}
+
+body {
+    line-height: 1;
+}
+
+menu,
+ol,
+ul {
+    list-style: none
+}
+
+blockquote,
+q {
+    quotes: none
+}
+
+blockquote:after,
+blockquote:before,
+q:after,
+q:before {
+    content: '';
+    content: none
+}
+
+table {
+    table-layout: fixed;
+    width: 100%;
+    border-collapse: collapse;
+    border-spacing: 0
+}
+* { box-sizing: border-box; margin: 0; padding: 0; line-height: 130%; font-family: "Pretendard", sans-serif;}
+html,
+body {
+    font-size: 20px;
+    width: 100%;
+    min-width: 320px;
+    height: 100%;
+    font-family: "Pretendard", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-weight: 400;
+    line-height: 130%;
+    color: #111;
+    letter-spacing: -1px;
+    word-break: keep-all;
+
+}
+
+:root {
+    /*color*/
+    --body: #F0F3F8;
+    --blue: #007bff;
+    --red: #dc3545;
+    --white: #fff;
+    --black: #000000;
+    --gray5: #F9f9f9;
+    --gray10: #F4F5F6;
+    --gray20: #eeeeee;
+    --gray30: #d7dadb;
+    --gray40: #cccccc;
+    --gray50: #bcbcbc;
+    --gray60: #878787;
+    --gray70: #666666;
+    --gray80: #333333;
+    --gray90: #1D1D1D;
+    --primary: #E95040;
+    --primary5: #FFF9F9;
+    --primary10: #FFECEC;
+    --primary20: #007bff;
+    --primary30: #007bff;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    font-weight: bold;
+}
+
+[class^=bg-].disabled {
+    opacity: .65;
+}
+
+[class^=hover_] {
+    transition: all .3s ease
+}
+
+[class^=hover_]:hover,
+[class^=hover_].active {
+    /*background-color: var(--primary10);*/
+    /*color: var(--primary)*/
+}
+
+a {
+    color: var(--black)
+}
+
+[class^=hover_]:hover {
+    text-decoration: underline;
+    text-underline-position: under;
+}
+
+button {
+    background-color: transparent;
+    border: 1px solid transparent;
+}
+
+img {
+    display: inline-block
+}
+::placeholder { font-size: 0.72rem; color: var(--gray50); font-weight: 500}
+input,
+select,
+textarea {
+    border: 1px solid var(--gray40);
+    border-radius: 0.4rem;
+    font-size: 0.7rem;
+    padding: 0 0.5rem;
+    color: var(--gray80);
+    height: 2.25rem;
+}
+select {
+    padding-right: 1.2rem;
+    background: var(--white);
+    appearance: none; /* 브라우저 기본 화살표 제거 */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    display: inline-block;
+}
+:focus { outline: 2px dashed #256ef4; outline-offset: 2px; transition: none}
+.select_box_wrap{ display: inline-flex; align-items: center}
+.select_box { position: relative; display: inline-flex; max-width: 100%; align-items: center}
+.select_box:after { content: ""; width: 0; height: 0; border-left: 0.25rem solid transparent; border-right: 0.25rem solid transparent; border-top: 0.25rem solid #000; position: absolute; right: 0.3rem; top: 50%; transform: translateY(-50%); pointer-events: none}
+.select_box.sz_s:after{ right: 0.1rem}
+.select_box.sz_s select{ border-radius: 0; border: none; padding-right: 0.75rem; height: 0.75rem; font-size: 0.6rem; font-weight: 400; padding-left: 0.25rem;}
+
+.form_check_wrap{ display: flex; flex-wrap: wrap; gap: 0.5rem 1rem}
+
+.form_check {display: inline-flex;align-items: flex-start}
+.form_check input[type=checkbox] { position: absolute !important; width: 1px !important; height: 1px !important;padding: 0 !important;margin: -1px !important;overflow: hidden !important;clip-path: inset(50%) !important;white-space: nowrap !important;border: 0 !important}
+.form_check label { display: flex; gap: 0.5rem; position: relative}
+
+.form_check.ty_01 label{ gap: 0.5rem; font-size: 0.6rem; font-weight: 500; align-items: center; line-height: 100%; color: var(--black);}
+.form_check.ty_01 label:before { content: ""; width: 0.75rem; height: 0.75rem; border-radius: 0.15rem; border: solid 1px #ccc; background: var(--white); display: inline-flex; flex-shrink: 0; position: relative; top: 1px}
+.form_check.ty_01 input[type=checkbox]:checked + label:before { background: var(--black) url("../img/icon/ic_check.svg") no-repeat center / 60% auto; border-color: transparent}
+
+.form_radio_wrap{ display: flex; flex-wrap: wrap; align-items: center}
+.form_radio_wrap.ty_01{ gap: 2rem}
+
+.form_radio {display: inline-flex;align-items: center; flex-shrink: 0}
+.form_radio.full { width: 100%; flex-shrink: 1}
+.form_radio.full label{ flex-shrink: 0}
+.form_radio.full input[type='text']{ width: 100%; flex-shrink: 1}
+.form_radio input[type=radio] { position: absolute !important; width: 1px !important; height: 1px !important;padding: 0 !important;margin: -1px !important;overflow: hidden !important;clip-path: inset(50%) !important;white-space: nowrap !important;border: 0 !important}
+.form_radio label { display: flex; gap: 0.25rem; position: relative}
+.form_radio label:after { position: absolute; left: 0; top: 0; display: none}
+.form_radio label:after,
+.form_radio label:before { flex-shrink: 0}
+.form_radio input[type='text'] { margin-left: 1rem}
+
+.form_radio.ty_01 label{ font-size: 0.7rem; font-weight: 600; color: var(--gray80);}
+.form_radio.ty_01 label:before,
+.form_radio.ty_01 label:after { content: ""; border-radius: 50%; border: solid 1px transparent;}
+.form_radio.ty_01 label:before { width: 0.9rem; height: 0.9rem; border: solid 1px var(--gray40); background: var(--white)}
+.form_radio.ty_01 label:after { width: 0.5rem; height: 0.5rem; background: #5d5d5d; left: 0.2rem; top: 0.2rem}
+.form_radio.ty_01 input[type=radio]:checked + label:before { border-color: #5d5d5d}
+.form_radio.ty_01 input[type=radio]:checked + label:after { display: block}
+
+
+@media (prefers-reduced-motion: reduce) {
+    .form_check * {transition: none !important}
+}
+
+button { cursor: pointer; display: inline-block}
+select[disabled="disabled"],
+input[readonly="readonly"],
+input[readonly],
+input[disabled="disabled"],
+input[disabled],
+select[readonly],
+textarea[readonly] {
+    background-color: #F6F7FA !important;
+    color: #667183 !important;
+}
+
+@media (max-width: 1024px) {
+    html, body {
+        font-size: 18px;
+    }
+}
+@media (max-width: 768px) {
+    html, body {
+        font-size: 16px;
+    }
+}
