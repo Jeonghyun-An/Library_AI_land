@@ -25,3 +25,8 @@ logs
 
 .json
 *.json
+
+/public/js/
+/public/css/
+/public/img/
+/public/fonts/
