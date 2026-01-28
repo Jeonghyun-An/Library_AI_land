@@ -26,6 +26,10 @@ KOREA_COUNTRIES = {
 
 # ==================== 아시아 ====================
 ASIA_COUNTRIES = {
+    "NP": Country("NP", "네팔", "Nepal", "asia", "South Asia"),
+    "TW": Country("TW", "대만", "Taiwan", "asia", "East Asia"),
+    "TL": Country("TL", "동티모르", "Timor-Leste", "asia", "Southeast Asia"),
+    "LA": Country("LA", "라오스", "Laos", "asia", "Southeast Asia"),
     "MY": Country("MY", "말레이시아", "Malaysia", "asia", "Southeast Asia"),
     "MM": Country("MM", "미얀마", "Myanmar", "asia", "Southeast Asia"),
     "BD": Country("BD", "방글라데시", "Bangladesh", "asia", "South Asia"),
@@ -46,6 +50,26 @@ ASIA_COUNTRIES = {
 
 # ==================== 유럽 ====================
 EUROPE_COUNTRIES = {
+    "GR": Country("GR", "그리스", "Greece", "europe", "Southern Europe"),
+    "NL": Country("NL", "네덜란드", "Netherlands", "europe", "Western Europe"),
+    "NO": Country("NO", "노르웨이", "Norway", "europe", "Northern Europe"),
+    "DK": Country("DK", "덴마크", "Denmark", "europe", "Northern Europe"),
+    "DE": Country("DE", "독일", "Germany", "europe", "Western Europe"),
+    "LV": Country("LV", "라트비아", "Latvia", "europe", "Northern Europe"),
+    "RO": Country("RO", "루마니아", "Romania", "europe", "Eastern Europe"),
+    "LU": Country("LU", "룩셈부르크", "Luxembourg", "europe", "Western Europe"),
+    "LT": Country("LT", "리투아니아", "Lithuania", "europe", "Northern Europe"),
+    "MC": Country("MC", "모나코", "Monaco", "europe", "Western Europe"),
+    "VA": Country("VA", "바티칸시국", "Vatican City", "europe", "Southern Europe"),
+    "BE": Country("BE", "벨기에", "Belgium", "europe", "Western Europe"),
+    "BG": Country("BG", "불가리아", "Bulgaria", "europe", "Eastern Europe"),
+    "RS": Country("RS", "세르비아", "Serbia", "europe", "Southern Europe"),
+    "SE": Country("SE", "스웨덴", "Sweden", "europe", "Northern Europe"),
+    "CH": Country("CH", "스위스", "Switzerland", "europe", "Western Europe"),
+    "ES": Country("ES", "스페인", "Spain", "europe", "Southern Europe"),
+    "SK": Country("SK", "슬로바키아", "Slovakia", "europe", "Central Europe"),
+    "SI": Country("SI", "슬로베니아", "Slovenia", "europe", "Southern Europe"),
+    "IS": Country("IS", "아이슬란드", "Iceland", "europe", "Northern Europe"),
     "IE": Country("IE", "아일랜드", "Ireland", "europe", "Western Europe"),
     "EE": Country("EE", "에스토니아", "Estonia", "europe", "Northern Europe"),
     "GB": Country("GB", "영국", "United Kingdom", "europe", "Western Europe"),
