@@ -91,14 +91,263 @@ class ComparativeSearchResponse(BaseModel):
     total_foreign_found: int
 
 
-# ==================== 업로드 엔드포인트 ====================
+# ==================== 일괄 업로드 엔드포인트 ====================
 
-@router.post("/upload")
+@router.post("/batch-upload",
+    summary="헌법 문서 일괄 업로드",
+    description="""
+    # 여러 헌법 문서를 한번에 업로드
+    
+    ## 사용 방법
+    1. 여러 개의 PDF 파일을 선택
+    2. 각 파일명은 국가 코드 형식 (예: KR.pdf, GH.pdf, US.pdf)
+    3. 업로드 버튼 클릭
+    
+    ## 처리 과정
+    - 각 파일을 개별적으로 처리
+    - 성공/실패를 개별 추적
+    - 백그라운드에서 병렬 인덱싱
+    
+    ## 응답
+    각 파일의 처리 결과를 배열로 반환
+    
+    ## 팁
+    - Swagger UI에서는 파일 선택 시 Ctrl/Cmd 클릭으로 여러 파일 선택
+    - 최대 50개 파일까지 권장
+    """,
+    responses={
+        200: {
+            "description": "일괄 업로드 완료",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "total": 3,
+                        "success": 2,
+                        "failed": 1,
+                        "results": [
+                            {
+                                "filename": "KR.pdf",
+                                "success": True,
+                                "country_name": "대한민국",
+                                "message": "대한민국 헌법 인덱싱이 시작되었습니다."
+                            },
+                            {
+                                "filename": "GH_1996.pdf",
+                                "success": True,
+                                "country_name": "가나",
+                                "message": "가나 헌법 인덱싱이 시작되었습니다."
+                            },
+                            {
+                                "filename": "invalid.pdf",
+                                "success": False,
+                                "error": "파일명에서 국가 코드를 추출할 수 없습니다."
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
+async def batch_upload_constitutions(
+    files: List[UploadFile] = File(..., description="여러 헌법 PDF 파일들 (각 파일명: {국가코드}.pdf 형식)"),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    여러 헌법 문서를 한번에 업로드
+    """
+    import json
+    from app.services.country_registry import get_country, validate_country_code
+    
+    results = []
+    
+    for file in files:
+        try:
+            # 국가 코드 추출
+            country_code = _extract_country_code_from_filename(file.filename)
+            
+            if not country_code:
+                results.append({
+                    "filename": file.filename,
+                    "success": False,
+                    "error": "파일명에서 국가 코드를 추출할 수 없습니다."
+                })
+                continue
+            
+            # 국가 코드 검증
+            if not validate_country_code(country_code):
+                results.append({
+                    "filename": file.filename,
+                    "success": False,
+                    "error": f"유효하지 않은 국가 코드: {country_code}"
+                })
+                continue
+            
+            # 국가 정보 조회
+            country_info = get_country(country_code)
+            
+            # 제목 및 버전 추출
+            title = f"{country_info.name_ko} 헌법"
+            version = _extract_version_from_filename(file.filename)
+            
+            # 임시 파일 저장
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+            content = await file.read()
+            temp_file.write(content)
+            temp_file.close()
+            
+            # doc_id 생성 (버전 포함)
+            content_hash = hashlib.sha256(content).hexdigest()[:8]
+            
+            if version:
+                version_safe = version.replace('-', '').replace('_', '')
+                doc_id = f"{country_code}_{version_safe}_{content_hash}"
+            else:
+                from datetime import datetime
+                timestamp = datetime.utcnow().strftime('%Y%m%d')
+                doc_id = f"{country_code}_{timestamp}_{content_hash}"
+            
+            # MinIO 저장 (개선된 경로)
+            minio_client = get_minio_client()
+            bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+            
+            if version:
+                version_folder = version.replace('-', '').replace('_', '')
+                minio_key = f"constitutions/{country_code}/{version_folder}/{country_code}_{version_folder}.pdf"
+            else:
+                timestamp = datetime.utcnow().strftime('%Y%m%d')
+                minio_key = f"constitutions/{country_code}/latest/{country_code}_{timestamp}.pdf"
+            
+            minio_client.put_object(
+                bucket_name,
+                minio_key,
+                io.BytesIO(content),
+                len(content),
+                content_type="application/pdf"
+            )
+            
+            # 백그라운드 인덱싱
+            if background_tasks:
+                background_tasks.add_task(
+                    _index_constitution_background,
+                    temp_file.name,
+                    doc_id,
+                    country_code,
+                    title,
+                    version,
+                    False,  # is_bilingual
+                    minio_key
+                )
+            
+            results.append({
+                "filename": file.filename,
+                "success": True,
+                "doc_id": doc_id,
+                "country_code": country_code,
+                "country_name": country_info.name_ko,
+                "continent": country_info.continent,
+                "title": title,
+                "version": version,
+                "message": f"{country_info.name_ko} 헌법 인덱싱이 시작되었습니다."
+            })
+        
+        except Exception as e:
+            results.append({
+                "filename": file.filename,
+                "success": False,
+                "error": str(e)
+            })
+    
+    # 통계
+    success_count = len([r for r in results if r.get("success")])
+    failed_count = len([r for r in results if not r.get("success")])
+    
+    return {
+        "total": len(files),
+        "success": success_count,
+        "failed": failed_count,
+        "results": results
+    }
+
+
+# ==================== 업로드 엔드포인트 (기존) ====================
+
+@router.post("/upload", 
+    summary="헌법 문서 업로드 (단일)",
+    description="""
+    # 헌법 문서 업로드
+    
+    ## 파일명 규칙
+    파일명에서 국가 코드를 자동으로 추출합니다.
+    
+    ### 지원 형식:
+    - `KR.pdf` - 대한민국
+    - `GH_1996.pdf` - 가나 (버전: 1996)
+    - `US_v1789.pdf` - 미국 (버전: 1789)
+    - `BR_2023-01-01.pdf` - 브라질 (버전: 2023-01-01)
+    
+    ## 자동 처리
+    1. 파일명에서 국가 코드 추출 (예: GH)
+    2. 국가 정보 자동 조회 (가나, 아프리카)
+    3. 제목 자동 생성 (예: "가나 헌법")
+    4. 버전 자동 추출 (파일명에 포함 시)
+    5. MinIO 저장 (constitutions/{continent}/{country}/)
+    6. Milvus 인덱싱 (백그라운드)
+    
+    ## 지원 국가: 118개국
+    - 한국(1), 아시아(20), 유럽(34), 북미(2), 아프리카(18), 오세아니아(2), 중동(12), 러시아/중앙아시아(12), 중남미(17)
+    
+    ## 옵션 파라미터
+    - `title`: 헌법 제목 (미제공 시 자동 생성)
+    - `version`: 버전 정보 (미제공 시 파일명에서 추출)
+    - `is_bilingual`: 이중언어 여부 (기본값: false)
+    """,
+    responses={
+        200: {
+            "description": "업로드 성공",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "doc_id": "constitution_gh_abc123",
+                        "country_code": "GH",
+                        "country_name": "가나",
+                        "continent": "africa",
+                        "title": "가나 헌법",
+                        "message": "가나 헌법 인덱싱이 시작되었습니다.",
+                        "status": "processing"
+                    }
+                }
+            }
+        },
+        400: {
+            "description": "잘못된 요청",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "invalid_filename": {
+                            "summary": "국가 코드 추출 실패",
+                            "value": {
+                                "detail": "파일명에서 국가 코드를 추출할 수 없습니다. 파일명 형식: {국가코드}.pdf (예: KR.pdf, GH.pdf)"
+                            }
+                        },
+                        "invalid_country": {
+                            "summary": "유효하지 않은 국가 코드",
+                            "value": {
+                                "detail": "유효하지 않은 국가 코드: XX. 지원되는 국가 코드 목록은 GET /api/constitution/countries 를 참고하세요."
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+)
 async def upload_constitution(
-    file: UploadFile = File(...),
-    title: Optional[str] = Form(None),
-    version: Optional[str] = Form(None),
-    is_bilingual: bool = Form(False),
+    file: UploadFile = File(..., description="헌법 PDF 파일 (파일명: {국가코드}.pdf 형식)"),
+    title: Optional[str] = Form(None, description="헌법 제목 (옵션, 미제공 시 자동 생성)"),
+    version: Optional[str] = Form(None, description="버전 정보 (옵션, 미제공 시 파일명에서 자동 추출)"),
+    is_bilingual: bool = Form(False, description="이중언어 여부 (영어+한글 병렬 구조)"),
     background_tasks: BackgroundTasks = None
 ):
     """
@@ -158,16 +407,44 @@ async def upload_constitution(
         temp_file.write(content)
         temp_file.close()
         
-        # 7. doc_id 생성
-        content_hash = hashlib.sha256(content).hexdigest()[:16]
-        doc_id = f"constitution_{country_code.lower()}_{content_hash}"
+        # 7. doc_id 생성 (버전 포함)
+        # 형식: {country_code}_{version}_{short_hash}
+        # 예: KR_1987_a1b2, GH_1996_c3d4
+        content_hash = hashlib.sha256(content).hexdigest()[:8]  # 16자 → 8자로 단축
         
-        # 8. MinIO에 원본 저장 (대륙별 폴더)
+        if version:
+            # 버전이 있으면: KR_1987_a1b2c3d4
+            version_safe = version.replace('-', '').replace('_', '')  # 날짜 형식 정리
+            doc_id = f"{country_code}_{version_safe}_{content_hash}"
+        else:
+            # 버전이 없으면: KR_latest_a1b2c3d4 또는 KR_{timestamp}_{hash}
+            from datetime import datetime
+            timestamp = datetime.utcnow().strftime('%Y%m%d')
+            doc_id = f"{country_code}_{timestamp}_{content_hash}"
+        
+        # 8. MinIO에 원본 저장
+        # 개선된 경로 구조: constitutions/{country_code}/{version}/{filename}.pdf
+        # 예시:
+        # - constitutions/KR/1987/KR_1987.pdf
+        # - constitutions/GH/1996/GH_1996.pdf
+        # - constitutions/US/1789/US_1789.pdf
+        
         minio_client = get_minio_client()
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
-        # MinIO 경로: constitutions/{continent}/{country_code}/{doc_id}.pdf
-        minio_key = f"constitutions/{country_info.continent}/{country_code}/{doc_id}.pdf"
+        # 버전별 폴더 구조
+        if version:
+            version_folder = version.replace('-', '').replace('_', '')
+            # constitutions/{country}/{version}/{country}_{version}.pdf
+            minio_key = f"constitutions/{country_code}/{version_folder}/{country_code}_{version_folder}.pdf"
+        else:
+            # 버전 없으면 latest 폴더
+            timestamp = datetime.utcnow().strftime('%Y%m%d')
+            minio_key = f"constitutions/{country_code}/latest/{country_code}_{timestamp}.pdf"
+        
+        # 메타데이터 경로 (JSON)
+        # constitutions/{country}/metadata/{doc_id}.json
+        metadata_key = f"constitutions/{country_code}/metadata/{doc_id}.json"
         
         minio_client.put_object(
             bucket_name,
@@ -418,6 +695,7 @@ async def _index_constitution_background(
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
         import json
+        from datetime import datetime
         
         # 청크 요약 정보
         chunk_summary = []
@@ -471,8 +749,9 @@ async def _index_constitution_background(
         # JSON으로 저장
         metadata_json = json.dumps(detailed_metadata, ensure_ascii=False, indent=2)
         
-        # MinIO 경로: constitutions/{continent}/{country}/metadata/{doc_id}.json
-        metadata_key = f"constitutions/{country_meta['continent']}/{country}/metadata/{doc_id}.json"
+        # MinIO 경로: constitutions/{country}/metadata/{doc_id}.json
+        # 예: constitutions/KR/metadata/KR_1987_a1b2c3d4.json
+        metadata_key = f"constitutions/{country}/metadata/{doc_id}.json"
         
         minio_client.put_object(
             bucket_name,
@@ -493,7 +772,70 @@ async def _index_constitution_background(
 
 # ==================== 비교 검색 엔드포인트 ====================
 
-@router.post("/comparative-search", response_model=ComparativeSearchResponse)
+@router.post("/comparative-search", 
+    response_model=ComparativeSearchResponse,
+    summary="비교헌법 검색",
+    description="""
+    # 한국 헌법 vs 외국 헌법 비교 검색
+    
+    ## 검색 프로세스
+    1. 쿼리 임베딩 생성 (BGE-M3)
+    2. Milvus 벡터 검색
+       - 한국 헌법: country="KR"
+       - 외국 헌법: country!="KR"
+    3. LLM 비교 요약 생성 (옵션)
+    
+    ## 검색 결과
+    - **좌측**: 한국 헌법 조항들
+    - **우측**: 외국 헌법 조항들
+    - **상단**: LLM 생성 비교 요약
+    
+    ## 필터 옵션
+    - `target_country`: 특정 국가만 (예: "GH", "US")
+    - `korean_top_k`: 한국 헌법 결과 수
+    - `foreign_top_k`: 외국 헌법 결과 수
+    
+    ## 검색 예시
+    - "인간의 존엄성"
+    - "표현의 자유"
+    - "재산권 보장"
+    - "삼권분립"
+    """,
+    responses={
+        200: {
+            "description": "검색 성공",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "query": "인간의 존엄성",
+                        "korean_results": [
+                            {
+                                "country": "KR",
+                                "display_path": "제2장 > 제10조",
+                                "korean_text": "제10조 모든 국민은 인간으로서의 존엄과 가치를 가지며...",
+                                "page": 3,
+                                "score": 0.92
+                            }
+                        ],
+                        "foreign_results": [
+                            {
+                                "country": "GH",
+                                "country_name": "가나",
+                                "display_path": "Article 15",
+                                "english_text": "(1) The dignity of all persons shall be inviolable.",
+                                "korean_text": "(1) 모든 사람의 존엄성은 불가침이다.",
+                                "page": 12,
+                                "score": 0.89
+                            }
+                        ],
+                        "summary": "한국 헌법 제10조와 가나 헌법 제15조는 모두 인간의 존엄성을 기본권으로 보장...",
+                        "search_time_ms": 456.7
+                    }
+                }
+            }
+        }
+    }
+)
 async def comparative_search(request: ComparativeSearchRequest):
     """
     비교헌법 검색
@@ -726,7 +1068,170 @@ async def _generate_comparison_summary(
 
 # ==================== PDF 페이지 이미지 엔드포인트 ====================
 
-@router.get("/pdf/{doc_id}/page/{page_no}")
+
+@router.get("/pdf/{doc_id}/download",
+    summary="PDF 파일 다운로드",
+    description="""
+    # PDF 원본 파일 다운로드
+    
+    ## 용도
+    - 전체 PDF 파일 다운로드
+    - 프론트엔드 PDF 뷰어에서 전체 문서 표시
+    - 사용자에게 다운로드 제공
+    
+    ## 파라미터
+    - `doc_id`: 문서 ID (예: KR_1987_a1b2c3d4)
+    - `inline`: true=브라우저에서 보기, false=다운로드 (기본: true)
+    
+    ## 사용 예시
+    ```
+    GET /api/constitution/pdf/KR_1987_a1b2c3d4/download
+    → PDF 파일 반환 (브라우저에서 보기)
+    
+    GET /api/constitution/pdf/KR_1987_a1b2c3d4/download?inline=false
+    → PDF 파일 다운로드
+    ```
+    """,
+    responses={
+        200: {
+            "description": "PDF 파일",
+            "content": {"application/pdf": {}}
+        }
+    }
+)
+async def download_pdf(
+    doc_id: str,
+    inline: bool = True
+):
+    """
+    PDF 원본 파일 다운로드
+    """
+    try:
+        # doc_id에서 국가 코드와 버전 추출
+        parts = doc_id.split('_')
+        if len(parts) < 2:
+            raise HTTPException(400, f"잘못된 doc_id 형식: {doc_id}")
+        
+        country_code = parts[0]
+        version_or_timestamp = parts[1]
+        
+        # MinIO에서 PDF 찾기
+        minio_client = get_minio_client()
+        bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+        
+        # 가능한 경로들 시도
+        possible_keys = [
+            f"constitutions/{country_code}/{version_or_timestamp}/{country_code}_{version_or_timestamp}.pdf",
+            f"constitutions/{country_code}/latest/{country_code}_{version_or_timestamp}.pdf",
+        ]
+        
+        pdf_data = None
+        found_key = None
+        
+        for key in possible_keys:
+            try:
+                pdf_data = minio_client.get_object(bucket_name, key)
+                found_key = key
+                break
+            except:
+                continue
+        
+        if not pdf_data:
+            # Milvus에서 minio_key 조회 (fallback)
+            collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+            collection = get_collection(collection_name, dim=1024)
+            
+            expr = f'metadata["doc_id"] == "{doc_id}"'
+            result = collection.query(
+                expr=expr,
+                output_fields=["metadata"],
+                limit=1
+            )
+            
+            if result and len(result) > 0:
+                meta = result[0].get('metadata', {})
+                if isinstance(meta, str):
+                    import json
+                    meta = json.loads(meta)
+                
+                minio_key = meta.get('minio_key')
+                if minio_key:
+                    pdf_data = minio_client.get_object(bucket_name, minio_key)
+                    found_key = minio_key
+        
+        if not pdf_data:
+            raise HTTPException(404, f"PDF 파일을 찾을 수 없습니다: {doc_id}")
+        
+        # PDF 데이터 읽기
+        pdf_bytes = pdf_data.read()
+        
+        # 파일명 생성
+        filename = f"{country_code}_{version_or_timestamp}.pdf"
+        
+        # Content-Disposition 헤더
+        disposition = "inline" if inline else "attachment"
+        
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'{disposition}; filename="{filename}"',
+                "Cache-Control": "public, max-age=3600"
+            }
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[PDF] Download error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"PDF 다운로드 실패: {e}")
+
+
+@router.get("/pdf/{doc_id}/page/{page_no}",
+    summary="PDF 페이지 이미지 반환",
+    description="""
+    # PDF 페이지를 이미지로 반환 (하이라이트용)
+    
+    ## 용도
+    - 프론트엔드 PDF 뷰어
+    - 검색 결과 하이라이트 오버레이
+    - 썸네일 생성
+    
+    ## 파라미터
+    - `doc_id`: 문서 ID (예: KR_1987_a1b2c3d4)
+    - `page_no`: 페이지 번호 (1-based)
+    - `format`: 이미지 포맷 (png | jpeg | base64)
+    - `dpi`: 해상도 (72-300, 기본: 150)
+    
+    ## 사용 예시
+    ```
+    GET /api/constitution/pdf/KR_1987_a1b2c3d4/page/3?format=png&dpi=150
+    → PNG 이미지 반환
+    
+    GET /api/constitution/pdf/KR_1987_a1b2c3d4/page/3?format=base64
+    → Base64 JSON 반환
+    ```
+    """,
+    responses={
+        200: {
+            "description": "이미지 또는 Base64 JSON",
+            "content": {
+                "image/png": {},
+                "image/jpeg": {},
+                "application/json": {
+                    "example": {
+                        "doc_id": "KR_1987_a1b2c3d4",
+                        "page": 3,
+                        "format": "base64",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAA..."
+                    }
+                }
+            }
+        }
+    }
+)
 async def get_pdf_page_image(
     doc_id: str,
     page_no: int,
@@ -737,30 +1242,79 @@ async def get_pdf_page_image(
     PDF 페이지를 이미지로 반환 (하이라이트용)
     
     Args:
-        doc_id: 문서 ID
+        doc_id: 문서 ID (예: KR_1987_a1b2c3d4)
         page_no: 페이지 번호 (1-based)
         format: 이미지 포맷 (png | jpeg | base64)
         dpi: 해상도
     """
     try:
-        # MinIO에서 PDF 다운로드
+        # doc_id에서 국가 코드와 버전 추출
+        # 형식: KR_1987_a1b2c3d4 또는 KR_20250127_a1b2c3d4
+        parts = doc_id.split('_')
+        if len(parts) < 2:
+            raise HTTPException(400, f"잘못된 doc_id 형식: {doc_id}")
+        
+        country_code = parts[0]
+        version_or_timestamp = parts[1]
+        
+        # MinIO에서 PDF 찾기
         minio_client = get_minio_client()
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
-        # doc_id로 MinIO 키 찾기
-        # (실제로는 Milvus에서 조회해야 함)
-        country = doc_id.split('_')[1] if '_' in doc_id else 'unknown'
-        minio_key = f"constitutions/{country}/{doc_id}.pdf"
+        # 가능한 경로들 시도
+        possible_keys = [
+            # 버전 폴더
+            f"constitutions/{country_code}/{version_or_timestamp}/{country_code}_{version_or_timestamp}.pdf",
+            # latest 폴더
+            f"constitutions/{country_code}/latest/{country_code}_{version_or_timestamp}.pdf",
+        ]
         
-        # PDF 데이터 가져오기
-        pdf_data = minio_client.get_object(bucket_name, minio_key)
+        pdf_data = None
+        found_key = None
+        
+        for key in possible_keys:
+            try:
+                pdf_data = minio_client.get_object(bucket_name, key)
+                found_key = key
+                break
+            except:
+                continue
+        
+        if not pdf_data:
+            # Milvus에서 minio_key 조회 (fallback)
+            collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+            collection = get_collection(collection_name, dim=1024)
+            
+            # doc_id로 검색
+            expr = f'metadata["doc_id"] == "{doc_id}"'
+            result = collection.query(
+                expr=expr,
+                output_fields=["metadata"],
+                limit=1
+            )
+            
+            if result and len(result) > 0:
+                meta = result[0].get('metadata', {})
+                if isinstance(meta, str):
+                    import json
+                    meta = json.loads(meta)
+                
+                minio_key = meta.get('minio_key')
+                if minio_key:
+                    pdf_data = minio_client.get_object(bucket_name, minio_key)
+                    found_key = minio_key
+        
+        if not pdf_data:
+            raise HTTPException(404, f"PDF 파일을 찾을 수 없습니다: {doc_id}")
+        
+        # PDF 데이터 읽기
         pdf_bytes = pdf_data.read()
         
         # PyMuPDF로 페이지 렌더링
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         
         if page_no < 1 or page_no > len(doc):
-            raise HTTPException(404, f"페이지 {page_no}가 존재하지 않습니다.")
+            raise HTTPException(404, f"페이지 {page_no}가 존재하지 않습니다. (총 {len(doc)}페이지)")
         
         page = doc[page_no - 1]  # 0-based index
         
@@ -778,7 +1332,9 @@ async def get_pdf_page_image(
                 "doc_id": doc_id,
                 "page": page_no,
                 "format": "base64",
-                "data": img_base64
+                "data": img_base64,
+                "width": pix.width,
+                "height": pix.height
             }
         
         elif format == "png":
@@ -789,7 +1345,8 @@ async def get_pdf_page_image(
                 content=img_bytes,
                 media_type="image/png",
                 headers={
-                    "Content-Disposition": f"inline; filename=page_{page_no}.png"
+                    "Content-Disposition": f"inline; filename={country_code}_page_{page_no}.png",
+                    "Cache-Control": "public, max-age=3600"
                 }
             )
         
@@ -801,12 +1358,17 @@ async def get_pdf_page_image(
                 content=img_bytes,
                 media_type="image/jpeg",
                 headers={
-                    "Content-Disposition": f"inline; filename=page_{page_no}.jpg"
+                    "Content-Disposition": f"inline; filename={country_code}_page_{page_no}.jpg",
+                    "Cache-Control": "public, max-age=3600"
                 }
             )
     
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[PDF] Page image error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"페이지 이미지 생성 실패: {e}")
 
 
@@ -853,7 +1415,58 @@ async def get_constitution_stats():
         raise HTTPException(500, f"통계 조회 실패: {e}")
 
 
-@router.get("/countries")
+@router.get("/countries",
+    summary="국가 목록 조회",
+    description="""
+    # 지원하는 국가 목록 조회
+    
+    ## 전체: 118개국
+    - 한국: 1개국
+    - 아시아: 20개국
+    - 유럽: 34개국
+    - 북아메리카: 2개국
+    - 아프리카: 18개국
+    - 오세아니아: 2개국
+    - 중동: 12개국
+    - 러시아/중앙아시아: 12개국
+    - 중남미: 17개국
+    
+    ## 필터 옵션
+    - `continent`: 대륙별 필터 (korea, asia, europe, ...)
+    
+    ## 응답 정보
+    각 국가의 코드, 한글명, 영문명, 대륙, 지역 정보 제공
+    """,
+    responses={
+        200: {
+            "description": "국가 목록",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "continent": "asia",
+                        "count": 20,
+                        "countries": [
+                            {
+                                "code": "KR",
+                                "name_ko": "대한민국",
+                                "name_en": "South Korea",
+                                "continent": "korea",
+                                "region": "Korea"
+                            },
+                            {
+                                "code": "JP",
+                                "name_ko": "일본",
+                                "name_en": "Japan",
+                                "continent": "asia",
+                                "region": "East Asia"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
 async def get_countries(continent: Optional[str] = None):
     """
     국가 목록 조회
