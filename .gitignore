@@ -90,3 +90,4 @@ data/
 
 /_FlagEmbedding_local/
 *.err
+frontend/public/css/swiper.css
