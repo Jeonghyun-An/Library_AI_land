@@ -96,33 +96,79 @@ class ComparativeSearchResponse(BaseModel):
 @router.post("/upload")
 async def upload_constitution(
     file: UploadFile = File(...),
-    title: str = Form(...),
-    country: str = Form(...),
+    title: Optional[str] = Form(None),
     version: Optional[str] = Form(None),
     is_bilingual: bool = Form(False),
     background_tasks: BackgroundTasks = None
 ):
     """
     헌법 문서 업로드 및 인덱싱
+    
+    파일명 규칙:
+    - {국가코드}.pdf (예: KR.pdf, US.pdf, GH.pdf)
+    - {국가코드}_v{버전}.pdf (예: KR_v1987.pdf)
+    - {국가코드}_{추가정보}.pdf (예: GH_1996.pdf)
+    
+    국가 코드는 파일명에서 자동으로 추출됩니다.
     """
     import json
+    from app.services.country_registry import get_country, validate_country_code
     
     try:
-        # 임시 파일 저장
+        # 1. 파일명에서 국가 코드 추출
+        filename = file.filename
+        country_code = _extract_country_code_from_filename(filename)
+        
+        if not country_code:
+            raise HTTPException(
+                400, 
+                f"파일명에서 국가 코드를 추출할 수 없습니다. "
+                f"파일명 형식: {{국가코드}}.pdf (예: KR.pdf, GH.pdf)"
+            )
+        
+        # 2. 국가 코드 유효성 검사
+        if not validate_country_code(country_code):
+            raise HTTPException(
+                400,
+                f"유효하지 않은 국가 코드: {country_code}. "
+                f"지원되는 국가 코드 목록은 GET /api/constitution/countries 를 참고하세요."
+            )
+        
+        # 3. 국가 정보 자동 조회
+        country_info = get_country(country_code)
+        
+        print(f"[CONSTITUTION] 파일명 '{filename}'에서 국가 코드 '{country_code}' 추출")
+        print(f"[CONSTITUTION] 국가: {country_info.name_ko} ({country_info.name_en})")
+        print(f"[CONSTITUTION] 대륙: {country_info.continent}, 지역: {country_info.region}")
+        
+        # 4. 제목 자동 생성 (제공되지 않은 경우)
+        if not title:
+            title = f"{country_info.name_ko} 헌법"
+            print(f"[CONSTITUTION] 자동 생성된 제목: {title}")
+        
+        # 5. 버전 추출 (파일명에 포함된 경우)
+        if not version:
+            version = _extract_version_from_filename(filename)
+            if version:
+                print(f"[CONSTITUTION] 파일명에서 버전 추출: {version}")
+        
+        # 6. 임시 파일 저장
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         content = await file.read()
         temp_file.write(content)
         temp_file.close()
         
-        # doc_id 생성
+        # 7. doc_id 생성
         content_hash = hashlib.sha256(content).hexdigest()[:16]
-        doc_id = f"constitution_{country.lower()}_{content_hash}"
+        doc_id = f"constitution_{country_code.lower()}_{content_hash}"
         
-        # MinIO에 원본 저장
+        # 8. MinIO에 원본 저장 (대륙별 폴더)
         minio_client = get_minio_client()
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
-        minio_key = f"constitutions/{country}/{doc_id}.pdf"
+        # MinIO 경로: constitutions/{continent}/{country_code}/{doc_id}.pdf
+        minio_key = f"constitutions/{country_info.continent}/{country_code}/{doc_id}.pdf"
+        
         minio_client.put_object(
             bucket_name,
             minio_key,
@@ -131,15 +177,15 @@ async def upload_constitution(
             content_type="application/pdf"
         )
         
-        print(f"[CONSTITUTION] Uploaded to MinIO: {minio_key}")
+        print(f"[CONSTITUTION] MinIO 업로드 완료: {minio_key}")
         
-        # 백그라운드 인덱싱
+        # 9. 백그라운드 인덱싱
         if background_tasks:
             background_tasks.add_task(
                 _index_constitution_background,
                 temp_file.name,
                 doc_id,
-                country,
+                country_code,
                 title,
                 version,
                 is_bilingual,
@@ -149,15 +195,20 @@ async def upload_constitution(
             return {
                 "success": True,
                 "doc_id": doc_id,
-                "message": "헌법 인덱싱이 시작되었습니다.",
-                "status": "processing"
+                "country_code": country_code,
+                "country_name": country_info.name_ko,
+                "continent": country_info.continent,
+                "title": title,
+                "message": f"{country_info.name_ko} 헌법 인덱싱이 시작되었습니다.",
+                "status": "processing",
+                "minio_key": minio_key
             }
         else:
             # 동기 처리 (테스트용)
             await _index_constitution_background(
                 temp_file.name,
                 doc_id,
-                country,
+                country_code,
                 title,
                 version,
                 is_bilingual,
@@ -167,17 +218,113 @@ async def upload_constitution(
             return {
                 "success": True,
                 "doc_id": doc_id,
-                "message": "헌법 인덱싱이 완료되었습니다.",
-                "status": "completed"
+                "country_code": country_code,
+                "country_name": country_info.name_ko,
+                "continent": country_info.continent,
+                "title": title,
+                "message": f"{country_info.name_ko} 헌법 인덱싱이 완료되었습니다.",
+                "status": "completed",
+                "minio_key": minio_key
             }
     
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[CONSTITUTION] Upload error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"업로드 실패: {e}")
     
     finally:
         if os.path.exists(temp_file.name):
             os.unlink(temp_file.name)
+
+
+def _extract_country_code_from_filename(filename: str) -> Optional[str]:
+    """
+    파일명에서 국가 코드 추출
+    
+    지원 형식:
+    - KR.pdf → KR
+    - GH_1996.pdf → GH
+    - US_v2023.pdf → US
+    - constitution_BR.pdf → BR
+    - ZA-constitution.pdf → ZA
+    """
+    import re
+    from app.services.country_registry import ALL_COUNTRIES
+    
+    # 확장자 제거
+    name_without_ext = filename.rsplit('.', 1)[0]
+    
+    # 패턴 1: 시작 부분의 2자리 대문자 (KR, GH, US)
+    pattern1 = re.match(r'^([A-Z]{2})', name_without_ext)
+    if pattern1:
+        code = pattern1.group(1)
+        if code in ALL_COUNTRIES:
+            return code
+    
+    # 패턴 2: 언더스코어 앞의 2자리 대문자 (KR_1987, GH_v1996)
+    pattern2 = re.match(r'^([A-Z]{2})_', name_without_ext)
+    if pattern2:
+        code = pattern2.group(1)
+        if code in ALL_COUNTRIES:
+            return code
+    
+    # 패턴 3: 하이픈 앞의 2자리 대문자 (KR-constitution, GH-1996)
+    pattern3 = re.match(r'^([A-Z]{2})-', name_without_ext)
+    if pattern3:
+        code = pattern3.group(1)
+        if code in ALL_COUNTRIES:
+            return code
+    
+    # 패턴 4: 파일명 전체가 2자리 대문자 (KR, GH)
+    if len(name_without_ext) == 2 and name_without_ext.isupper():
+        code = name_without_ext
+        if code in ALL_COUNTRIES:
+            return code
+    
+    # 패턴 5: 언더스코어 뒤의 2자리 대문자 (constitution_KR)
+    pattern5 = re.search(r'_([A-Z]{2})(?:_|$)', name_without_ext)
+    if pattern5:
+        code = pattern5.group(1)
+        if code in ALL_COUNTRIES:
+            return code
+    
+    return None
+
+
+def _extract_version_from_filename(filename: str) -> Optional[str]:
+    """
+    파일명에서 버전 정보 추출
+    
+    예시:
+    - KR_1987.pdf → 1987
+    - GH_v1996.pdf → 1996
+    - US_2023-12-01.pdf → 2023-12-01
+    """
+    import re
+    
+    # 확장자 제거
+    name_without_ext = filename.rsplit('.', 1)[0]
+    
+    # 패턴 1: v 접두사 + 숫자 (v1987, v2023)
+    pattern1 = re.search(r'_v(\d{4})', name_without_ext, re.IGNORECASE)
+    if pattern1:
+        return pattern1.group(1)
+    
+    # 패턴 2: 4자리 연도 (1987, 2023)
+    pattern2 = re.search(r'_(\d{4})(?:_|$|-)', name_without_ext)
+    if pattern2:
+        return pattern2.group(1)
+    
+    # 패턴 3: 날짜 형식 (2023-12-01, 2023_12_01)
+    pattern3 = re.search(r'_(\d{4}[-_]\d{2}[-_]\d{2})', name_without_ext)
+    if pattern3:
+        date_str = pattern3.group(1).replace('_', '-')
+        return date_str
+    
+    return None
 
 
 async def _index_constitution_background(

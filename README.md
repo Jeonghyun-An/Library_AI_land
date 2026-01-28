@@ -195,6 +195,15 @@ curl -X POST http://localhost:8000/api/library/search \
 4. **비교 분석 지원**
    - 유사 조문 매핑 메타데이터 추가
 
+## 법령 라우터 지원 파일명 패턴
+
+패턴 예시 추출 결과
+기본 KR.pdf KR
+버전포함 GH_1996.pdf GH, 버전: 1996
+v 접두사US_v1789.pdfUS, 버전: 1789
+날짜 형식KR_1987-10-29.pdfKR, 버전: 1987-10-29
+추가 정보GH_1996_bilingual.pdfGH, 버전: 1996
+
 ## 최적화 포인트
 
 ### GPU 메모리 관리 (A4000 16GB)
