@@ -138,7 +138,7 @@ LATIN_AMERICA_COUNTRIES = {
     "BR": Country("BR", "브라질", "Brazil", "latin_america", "South America"),
     "AR": Country("AR", "아르헨티나", "Argentina", "latin_america", "South America"),
     "EC": Country("EC", "에콰도르", "Ecuador", "latin_america", "South America"),
-    "SV": Country("SV", "엘살바도르", "El Salvador", "latin_america", "Central America"),
+    "SV": Country("SV", "엘살바도르", "El Salvador", "latin_america", "Central America"), # 헌법이 없음
     "HN": Country("HN", "온두라스", "Honduras", "latin_america", "Central America"),
     "UY": Country("UY", "우루과이", "Uruguay", "latin_america", "South America"),
     "CL": Country("CL", "칠레", "Chile", "latin_america", "South America"),

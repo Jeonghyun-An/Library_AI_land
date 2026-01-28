@@ -1,8 +1,12 @@
 # Library_AI_land
 
+# constitution_AI_System
+
 # Library Knowledge RAG System
 
 도서관 지식검색을 위한 RAG (Retrieval-Augmented Generation) 시스템
+이었으나
+현재는 헌법 비교 분석 시스템으로 확장되었습니다.
 
 ## 프로젝트 목표
 
@@ -118,6 +122,22 @@ curl http://localhost:8000/health
 curl http://localhost:90
 ```
 
+### DB 초기화
+
+```bash
+docker-compose down
+
+docker volume rm library_milvus_data
+docker volume rm library_minio_data
+docker volume rm library_etcd_data
+
+docker volume create library_milvus_data
+docker volume create library_minio_data
+docker volume create library_etcd_data
+
+docker-compose up -d
+```
+
 ## 사용 가이드
 
 ### 도서 업로드
@@ -160,6 +180,20 @@ curl -X POST http://localhost:8000/api/library/search \
    - 목차 (TOC) 분리
    - 각주/미주 연결
    - 표/그림 캡션 보존
+
+### 법령 특화 청킹 (Comparative Constitution Chunker)
+
+1. **조문 단위 분할**
+   - "제1조", "Article 1" 등 조문 헤더 인식
+   - 조문 번호 및 제목 보존
+2. **국가별 메타데이터 포함**
+   - 국가명, 국가 코드, 문서 언어 등
+3. **토큰 기반 최적화**
+   - Target: 512 tokens
+   - Overlap: 64 tokens
+   - Min chunk: 100 tokens
+4. **비교 분석 지원**
+   - 유사 조문 매핑 메타데이터 추가
 
 ## 최적화 포인트
 
@@ -241,3 +275,7 @@ search_params = {
 ## 라이선스
 
 MIT License
+
+Made by [Hyonii] Landsoft
+Contact:
+ajh@landsoft.co.kr
