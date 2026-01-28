@@ -191,9 +191,13 @@ async def _index_constitution_background(
 ):
     """헌법 인덱싱 백그라운드 작업"""
     import traceback
+    from app.services.country_registry import get_country_metadata
     
     try:
         print(f"[CONSTITUTION] Indexing started: {doc_id}")
+        
+        # 국가 메타데이터 가져오기
+        country_meta = get_country_metadata(country)
         
         # 1. 청킹 (bbox 포함)
         chunks = chunk_constitution_document(
@@ -229,11 +233,26 @@ async def _index_constitution_background(
         chunk_texts = [chunk.korean_text or chunk.english_text or "" for chunk in chunks]
         metadatas = [chunk.to_dict() for chunk in chunks]
         
-        # 메타데이터에 MinIO 키 추가
+        # 메타데이터 강화 (MinIO RDB 스타일)
         for meta in metadatas:
+            # MinIO 경로
             meta["minio_key"] = minio_key
+            meta["minio_bucket"] = os.getenv("MINIO_BUCKET", "library-bucket")
+            
+            # 문서 타입
+            meta["doc_type"] = "constitution"
+            
+            # 국가 정보 (레지스트리 기반)
+            meta.update(country_meta)  # country_code, country_name_ko, country_name_en, continent, region
+            
+            # 버전 정보
+            meta["constitution_version"] = version
+            meta["constitution_title"] = title
+            meta["is_bilingual"] = is_bilingual
+            
+            # 타임스탬프
             meta["indexed_at"] = datetime.utcnow().isoformat()
-            meta["doc_type"] = "constitution"  # 문서 타입 구분
+            meta["updated_at"] = datetime.utcnow().isoformat()
         
         entities = [
             ids,
@@ -247,31 +266,76 @@ async def _index_constitution_background(
         
         print(f"[CONSTITUTION] Inserted {len(chunks)} chunks into Milvus")
         
-        # 4. MinIO에 메타데이터 저장
+        # 4. MinIO에 상세 메타데이터 저장 (RDB 스타일)
         minio_client = get_minio_client()
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
         import json
-        metadata_json = json.dumps({
+        
+        # 청크 요약 정보
+        chunk_summary = []
+        for i, chunk in enumerate(chunks):
+            chunk_summary.append({
+                "seq": i,
+                "article_number": chunk.structure.get("article_number"),
+                "chapter_number": chunk.structure.get("chapter_number"),
+                "display_path": chunk.display_path,
+                "page": chunk.page,
+                "has_english": chunk.has_english,
+                "has_korean": chunk.has_korean,
+            })
+        
+        # 상세 메타데이터
+        detailed_metadata = {
+            # 기본 정보
             "doc_id": doc_id,
-            "country": country,
-            "title": title,
-            "version": version,
+            "doc_type": "constitution",
+            
+            # 국가 정보
+            **country_meta,
+            
+            # 헌법 정보
+            "constitution_title": title,
+            "constitution_version": version,
             "is_bilingual": is_bilingual,
-            "chunk_count": len(chunks),
+            
+            # 파일 정보
             "minio_key": minio_key,
+            "minio_bucket": bucket_name,
+            "file_size_bytes": os.path.getsize(pdf_path),
+            "mime_type": "application/pdf",
+            
+            # 청킹 통계
+            "chunk_count": len(chunks),
+            "chunk_strategy": "article_level",
+            "embedding_model": os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3"),
+            "chunk_summary": chunk_summary,
+            
+            # 구조 통계
+            "total_articles": len(set(c.structure.get("article_number") for c in chunks if c.structure.get("article_number"))),
+            "total_chapters": len(set(c.structure.get("chapter_number") for c in chunks if c.structure.get("chapter_number"))),
+            
+            # 타임스탬프
             "indexed_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
             "status": "completed"
-        }, ensure_ascii=False, indent=2)
+        }
+        
+        # JSON으로 저장
+        metadata_json = json.dumps(detailed_metadata, ensure_ascii=False, indent=2)
+        
+        # MinIO 경로: constitutions/{continent}/{country}/metadata/{doc_id}.json
+        metadata_key = f"constitutions/{country_meta['continent']}/{country}/metadata/{doc_id}.json"
         
         minio_client.put_object(
             bucket_name,
-            f"constitutions/{country}/{doc_id}_meta.json",
+            metadata_key,
             io.BytesIO(metadata_json.encode('utf-8')),
             len(metadata_json.encode('utf-8')),
             content_type='application/json'
         )
         
+        print(f"[CONSTITUTION] Metadata saved to MinIO: {metadata_key}")
         print(f"[CONSTITUTION] Indexing completed: {doc_id}")
     
     except Exception as e:
@@ -604,22 +668,86 @@ async def get_pdf_page_image(
 @router.get("/stats")
 async def get_constitution_stats():
     """헌법 데이터 통계"""
+    from app.services.country_registry import get_all_continents, CONTINENT_MAPPING
+    
     try:
         collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
         collection = get_collection(collection_name, dim=1024)
         
-        # 전체 청크 수
+        # 전체 헌법 청크 수
+        # (실제로는 expr로 필터링해야 하지만 여기서는 간단히)
         total_chunks = collection.num_entities
         
-        # TODO: 국가별 통계 (실제 쿼리 필요)
+        # 대륙별 국가 목록
+        continents_info = {}
+        for continent in get_all_continents():
+            countries = CONTINENT_MAPPING.get(continent, {})
+            continents_info[continent] = {
+                "country_count": len(countries),
+                "countries": [
+                    {
+                        "code": c.code,
+                        "name_ko": c.name_ko,
+                        "name_en": c.name_en,
+                        "region": c.region
+                    }
+                    for c in countries.values()
+                ]
+            }
         
         return {
             "collection": collection_name,
             "total_chunks": total_chunks,
-            "constitution_count": "N/A",  # 실제 구현 필요
-            "countries": ["KR", "GH", "NG", "ZA"],
+            "continents": continents_info,
             "status": "active"
         }
     
     except Exception as e:
         raise HTTPException(500, f"통계 조회 실패: {e}")
+
+
+@router.get("/countries")
+async def get_countries(continent: Optional[str] = None):
+    """
+    국가 목록 조회
+    
+    Args:
+        continent: 대륙 필터 (옵션)
+    """
+    from app.services.country_registry import get_countries_by_continent, ALL_COUNTRIES
+    
+    if continent:
+        countries = get_countries_by_continent(continent)
+    else:
+        countries = ALL_COUNTRIES
+    
+    return {
+        "continent": continent or "All",
+        "count": len(countries),
+        "countries": [
+            {
+                "code": c.code,
+                "name_ko": c.name_ko,
+                "name_en": c.name_en,
+                "continent": c.continent,
+                "region": c.region
+            }
+            for c in countries.values()
+        ]
+    }
+
+
+@router.get("/continents")
+async def get_continents():
+    """대륙 목록 조회"""
+    from app.services.country_registry import get_all_continents, CONTINENT_MAPPING
+    
+    return {
+        "continents": [
+            {
+                "name": continent,
+                "country_count": len(CONTINENT_MAPPING[continent])
+            }
+            for continent in get_all_continents()
+        ]
+    }
