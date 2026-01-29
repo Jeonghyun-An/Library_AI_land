@@ -11,6 +11,7 @@ import io
 import base64
 import hashlib
 import tempfile
+import json
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -272,94 +273,18 @@ async def batch_upload_constitutions(
 
 # ==================== 업로드 엔드포인트 (기존) ====================
 
-@router.post("/upload", 
-    summary="헌법 문서 업로드 (단일)",
-    description="""
-    # 헌법 문서 업로드
-    
-    ## 파일명 규칙
-    파일명에서 국가 코드를 자동으로 추출합니다.
-    
-    ### 지원 형식:
-    - `KR.pdf` - 대한민국
-    - `GH_1996.pdf` - 가나 (버전: 1996)
-    - `US_v1789.pdf` - 미국 (버전: 1789)
-    - `BR_2023-01-01.pdf` - 브라질 (버전: 2023-01-01)
-    
-    ## 자동 처리
-    1. 파일명에서 국가 코드 추출 (예: GH)
-    2. 국가 정보 자동 조회 (가나, 아프리카)
-    3. 제목 자동 생성 (예: "가나 헌법")
-    4. 버전 자동 추출 (파일명에 포함 시)
-    5. MinIO 저장 (constitutions/{continent}/{country}/)
-    6. Milvus 인덱싱 (백그라운드)
-    
-    ## 지원 국가: 118개국
-    - 한국(1), 아시아(20), 유럽(34), 북미(2), 아프리카(18), 오세아니아(2), 중동(12), 러시아/중앙아시아(12), 중남미(17)
-    
-    ## 옵션 파라미터
-    - `title`: 헌법 제목 (미제공 시 자동 생성)
-    - `version`: 버전 정보 (미제공 시 파일명에서 추출)
-    - `is_bilingual`: 이중언어 여부 (기본값: false)
-    """,
-    responses={
-        200: {
-            "description": "업로드 성공",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "success": True,
-                        "doc_id": "constitution_gh_abc123",
-                        "country_code": "GH",
-                        "country_name": "가나",
-                        "continent": "africa",
-                        "title": "가나 헌법",
-                        "message": "가나 헌법 인덱싱이 시작되었습니다.",
-                        "status": "processing"
-                    }
-                }
-            }
-        },
-        400: {
-            "description": "잘못된 요청",
-            "content": {
-                "application/json": {
-                    "examples": {
-                        "invalid_filename": {
-                            "summary": "국가 코드 추출 실패",
-                            "value": {
-                                "detail": "파일명에서 국가 코드를 추출할 수 없습니다. 파일명 형식: {국가코드}.pdf (예: KR.pdf, GH.pdf)"
-                            }
-                        },
-                        "invalid_country": {
-                            "summary": "유효하지 않은 국가 코드",
-                            "value": {
-                                "detail": "유효하지 않은 국가 코드: XX. 지원되는 국가 코드 목록은 GET /api/constitution/countries 를 참고하세요."
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-)
+# app/api/comparative_constitution_router.py
+# upload_constitution 함수 수정
+
+@router.post("/upload")
 async def upload_constitution(
-    file: UploadFile = File(..., description="헌법 PDF 파일 (파일명: {국가코드}.pdf 형식)"),
-    title: Optional[str] = Form(None, description="헌법 제목 (옵션, 미제공 시 자동 생성)"),
-    version: Optional[str] = Form(None, description="버전 정보 (옵션, 미제공 시 파일명에서 자동 추출)"),
-    is_bilingual: bool = Form(False, description="이중언어 여부 (영어+한글 병렬 구조)"),
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    version: Optional[str] = Form(None),
+    is_bilingual: bool = Form(False),
     background_tasks: BackgroundTasks = None
 ):
-    """
-    헌법 문서 업로드 및 인덱싱
-    
-    파일명 규칙:
-    - {국가코드}.pdf (예: KR.pdf, US.pdf, GH.pdf)
-    - {국가코드}_v{버전}.pdf (예: KR_v1987.pdf)
-    - {국가코드}_{추가정보}.pdf (예: GH_1996.pdf)
-    
-    국가 코드는 파일명에서 자동으로 추출됩니다.
-    """
+    """헌법 문서 업로드 및 인덱싱"""
     import json
     from app.services.country_registry import get_country, validate_country_code
     
@@ -388,18 +313,14 @@ async def upload_constitution(
         
         print(f"[CONSTITUTION] 파일명 '{filename}'에서 국가 코드 '{country_code}' 추출")
         print(f"[CONSTITUTION] 국가: {country_info.name_ko} ({country_info.name_en})")
-        print(f"[CONSTITUTION] 대륙: {country_info.continent}, 지역: {country_info.region}")
         
-        # 4. 제목 자동 생성 (제공되지 않은 경우)
+        # 4. 제목 자동 생성
         if not title:
             title = f"{country_info.name_ko} 헌법"
-            print(f"[CONSTITUTION] 자동 생성된 제목: {title}")
         
-        # 5. 버전 추출 (파일명에 포함된 경우)
+        # 5. 버전 추출
         if not version:
             version = _extract_version_from_filename(filename)
-            if version:
-                print(f"[CONSTITUTION] 파일명에서 버전 추출: {version}")
         
         # 6. 임시 파일 저장
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -407,44 +328,27 @@ async def upload_constitution(
         temp_file.write(content)
         temp_file.close()
         
-        # 7. doc_id 생성 (버전 포함)
-        # 형식: {country_code}_{version}_{short_hash}
-        # 예: KR_1987_a1b2, GH_1996_c3d4
-        content_hash = hashlib.sha256(content).hexdigest()[:8]  # 16자 → 8자로 단축
+        # 7. doc_id 생성
+        content_hash = hashlib.sha256(content).hexdigest()[:8]
         
         if version:
-            # 버전이 있으면: KR_1987_a1b2c3d4
-            version_safe = version.replace('-', '').replace('_', '')  # 날짜 형식 정리
+            version_safe = version.replace('-', '').replace('_', '')
             doc_id = f"{country_code}_{version_safe}_{content_hash}"
         else:
-            # 버전이 없으면: KR_latest_a1b2c3d4 또는 KR_{timestamp}_{hash}
             from datetime import datetime
             timestamp = datetime.utcnow().strftime('%Y%m%d')
             doc_id = f"{country_code}_{timestamp}_{content_hash}"
         
-        # 8. MinIO에 원본 저장
-        # 개선된 경로 구조: constitutions/{country_code}/{version}/{filename}.pdf
-        # 예시:
-        # - constitutions/KR/1987/KR_1987.pdf
-        # - constitutions/GH/1996/GH_1996.pdf
-        # - constitutions/US/1789/US_1789.pdf
-        
+        # 8. MinIO 저장
         minio_client = get_minio_client()
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
-        # 버전별 폴더 구조
         if version:
             version_folder = version.replace('-', '').replace('_', '')
-            # constitutions/{country}/{version}/{country}_{version}.pdf
             minio_key = f"constitutions/{country_code}/{version_folder}/{country_code}_{version_folder}.pdf"
         else:
-            # 버전 없으면 latest 폴더
             timestamp = datetime.utcnow().strftime('%Y%m%d')
             minio_key = f"constitutions/{country_code}/latest/{country_code}_{timestamp}.pdf"
-        
-        # 메타데이터 경로 (JSON)
-        # constitutions/{country}/metadata/{doc_id}.json
-        metadata_key = f"constitutions/{country_code}/metadata/{doc_id}.json"
         
         minio_client.put_object(
             bucket_name,
@@ -460,7 +364,7 @@ async def upload_constitution(
         if background_tasks:
             background_tasks.add_task(
                 _index_constitution_background,
-                temp_file.name,
+                temp_file.name,  # 임시 파일 경로
                 doc_id,
                 country_code,
                 title,
@@ -481,28 +385,33 @@ async def upload_constitution(
                 "minio_key": minio_key
             }
         else:
-            # 동기 처리 (테스트용)
-            await _index_constitution_background(
-                temp_file.name,
-                doc_id,
-                country_code,
-                title,
-                version,
-                is_bilingual,
-                minio_key
-            )
-            
-            return {
-                "success": True,
-                "doc_id": doc_id,
-                "country_code": country_code,
-                "country_name": country_info.name_ko,
-                "continent": country_info.continent,
-                "title": title,
-                "message": f"{country_info.name_ko} 헌법 인덱싱이 완료되었습니다.",
-                "status": "completed",
-                "minio_key": minio_key
-            }
+            # 동기 처리
+            try:
+                await _index_constitution_background(
+                    temp_file.name,
+                    doc_id,
+                    country_code,
+                    title,
+                    version,
+                    is_bilingual,
+                    minio_key
+                )
+                
+                return {
+                    "success": True,
+                    "doc_id": doc_id,
+                    "country_code": country_code,
+                    "country_name": country_info.name_ko,
+                    "continent": country_info.continent,
+                    "title": title,
+                    "message": f"{country_info.name_ko} 헌법 인덱싱이 완료되었습니다.",
+                    "status": "completed",
+                    "minio_key": minio_key
+                }
+            finally:
+                # 동기 처리인 경우에만 즉시 삭제
+                if os.path.exists(temp_file.name):
+                    os.unlink(temp_file.name)
     
     except HTTPException:
         raise
@@ -512,9 +421,7 @@ async def upload_constitution(
         traceback.print_exc()
         raise HTTPException(500, f"업로드 실패: {e}")
     
-    finally:
-        if os.path.exists(temp_file.name):
-            os.unlink(temp_file.name)
+
 
 
 def _extract_country_code_from_filename(filename: str) -> Optional[str]:
@@ -620,10 +527,14 @@ async def _index_constitution_background(
     try:
         print(f"[CONSTITUTION] Indexing started: {doc_id}")
         
+        # 1. 파일 존재 확인
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError(f"임시 파일이 존재하지 않습니다: {pdf_path}")
+        
         # 국가 메타데이터 가져오기
         country_meta = get_country_metadata(country)
         
-        # 1. 청킹 (bbox 포함)
+        # 2. 청킹 (bbox 포함)
         chunks = chunk_constitution_document(
             pdf_path=pdf_path,
             doc_id=doc_id,
@@ -635,7 +546,7 @@ async def _index_constitution_background(
         
         print(f"[CONSTITUTION] Generated {len(chunks)} chunks")
         
-        # 2. 임베딩 생성
+        # 3. 임베딩 생성
         emb_model = get_embedding_model()
         
         search_texts = [chunk.search_text for chunk in chunks]
@@ -648,7 +559,7 @@ async def _index_constitution_background(
         
         print(f"[CONSTITUTION] Generated embeddings: {embeddings.shape}")
         
-        # 3. Milvus 저장
+        # 4. Milvus 저장
         collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
         collection = get_collection(collection_name, dim=1024)
         
@@ -657,24 +568,15 @@ async def _index_constitution_background(
         chunk_texts = [chunk.korean_text or chunk.english_text or "" for chunk in chunks]
         metadatas = [chunk.to_dict() for chunk in chunks]
         
-        # 메타데이터 강화 (MinIO RDB 스타일)
+        # 메타데이터 강화
         for meta in metadatas:
-            # MinIO 경로
             meta["minio_key"] = minio_key
             meta["minio_bucket"] = os.getenv("MINIO_BUCKET", "library-bucket")
-            
-            # 문서 타입
             meta["doc_type"] = "constitution"
-            
-            # 국가 정보 (레지스트리 기반)
-            meta.update(country_meta)  # country_code, country_name_ko, country_name_en, continent, region
-            
-            # 버전 정보
+            meta.update(country_meta)
             meta["constitution_version"] = version
             meta["constitution_title"] = title
             meta["is_bilingual"] = is_bilingual
-            
-            # 타임스탬프
             meta["indexed_at"] = datetime.utcnow().isoformat()
             meta["updated_at"] = datetime.utcnow().isoformat()
         
@@ -690,14 +592,10 @@ async def _index_constitution_background(
         
         print(f"[CONSTITUTION] Inserted {len(chunks)} chunks into Milvus")
         
-        # 4. MinIO에 상세 메타데이터 저장 (RDB 스타일)
+        # 5. MinIO 메타데이터 저장
         minio_client = get_minio_client()
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
-        import json
-        from datetime import datetime
-        
-        # 청크 요약 정보
         chunk_summary = []
         for i, chunk in enumerate(chunks):
             chunk_summary.append({
@@ -710,47 +608,29 @@ async def _index_constitution_background(
                 "has_korean": chunk.has_korean,
             })
         
-        # 상세 메타데이터
         detailed_metadata = {
-            # 기본 정보
             "doc_id": doc_id,
             "doc_type": "constitution",
-            
-            # 국가 정보
             **country_meta,
-            
-            # 헌법 정보
             "constitution_title": title,
             "constitution_version": version,
             "is_bilingual": is_bilingual,
-            
-            # 파일 정보
             "minio_key": minio_key,
             "minio_bucket": bucket_name,
             "file_size_bytes": os.path.getsize(pdf_path),
             "mime_type": "application/pdf",
-            
-            # 청킹 통계
             "chunk_count": len(chunks),
             "chunk_strategy": "article_level",
             "embedding_model": os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3"),
             "chunk_summary": chunk_summary,
-            
-            # 구조 통계
             "total_articles": len(set(c.structure.get("article_number") for c in chunks if c.structure.get("article_number"))),
             "total_chapters": len(set(c.structure.get("chapter_number") for c in chunks if c.structure.get("chapter_number"))),
-            
-            # 타임스탬프
             "indexed_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
             "status": "completed"
         }
         
-        # JSON으로 저장
         metadata_json = json.dumps(detailed_metadata, ensure_ascii=False, indent=2)
-        
-        # MinIO 경로: constitutions/{country}/metadata/{doc_id}.json
-        # 예: constitutions/KR/metadata/KR_1987_a1b2c3d4.json
         metadata_key = f"constitutions/{country}/metadata/{doc_id}.json"
         
         minio_client.put_object(
@@ -768,8 +648,14 @@ async def _index_constitution_background(
         print(f"[CONSTITUTION] Indexing failed: {e}")
         traceback.print_exc()
         raise
-
-
+    
+    finally:
+        if os.path.exists(pdf_path):
+            try:
+                os.unlink(pdf_path)
+                print(f"[CONSTITUTION] Temporary file deleted: {pdf_path}")
+            except Exception as e:
+                print(f"[CONSTITUTION] Failed to delete temp file: {e}")
 # ==================== 비교 검색 엔드포인트 ====================
 
 @router.post("/comparative-search", 
