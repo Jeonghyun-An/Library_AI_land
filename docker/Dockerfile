@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y \
     python3.10 \
     python3-pip \
     python3-dev \
@@ -43,7 +43,10 @@ RUN pip install --no-cache-dir \
     torchaudio==2.1.0 \
     --index-url https://download.pytorch.org/whl/cu121
 
-RUN pip install --no-cache-dir numpy==1.24.3 Pillow==10.1.0
+RUN pip install --no-cache-dir \
+    numpy==1.24.3 \
+    Pillow==10.1.0
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/

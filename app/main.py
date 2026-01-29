@@ -9,7 +9,7 @@ import os
 
 # 라우터 임포트
 from app.api.library_router import router as library_router
-from app.api.constitution_router import router as constitution_router
+# from app.api.constitution_router import router as constitution_router
 from app.api.comparative_constitution_router import router as comparative_constitution_router
 
 # FastAPI 앱 생성
@@ -30,7 +30,7 @@ app.add_middleware(
 
 # 라우터 등록
 app.include_router(library_router)
-app.include_router(constitution_router)
+# app.include_router(constitution_router)
 app.include_router(comparative_constitution_router)
 
 # 루트 엔드포인트
