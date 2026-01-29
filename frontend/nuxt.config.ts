@@ -50,13 +50,7 @@ export default defineNuxtConfig({
           href: "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css",
         },
       ],
-      script: [
-        { src: "/js/jquery-3.6.0.js", tagPosition: "bodyClose" },
-        { src: "/js/jquery-ui.js", tagPosition: "bodyClose" },
-        { src: "/js/slick.min.js", tagPosition: "bodyClose" },
-        { src: "/js/swiper.js", tagPosition: "bodyClose" },
-        { src: "/js/common.js", tagPosition: "bodyClose" },
-      ],
+      script: [],
     },
   },
 
