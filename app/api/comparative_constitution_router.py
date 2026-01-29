@@ -656,6 +656,338 @@ async def _index_constitution_background(
                 print(f"[CONSTITUTION] Temporary file deleted: {pdf_path}")
             except Exception as e:
                 print(f"[CONSTITUTION] Failed to delete temp file: {e}")
+
+# ==================== 삭제 엔드포인트 ====================
+
+@router.delete("/delete/{doc_id}",
+    summary="헌법 문서 삭제"
+)
+async def delete_constitution(doc_id: str):
+    """
+    헌법 문서 완전 삭제
+    
+    - Milvus에서 벡터 데이터 삭제
+    - MinIO에서 원본 PDF 삭제
+    - MinIO에서 메타데이터 JSON 삭제
+    """
+    try:
+        print(f"[CONSTITUTION-DELETE] Starting deletion for: {doc_id}")
+        
+        deleted_items = {
+            "milvus_chunks": 0,
+            "minio_pdf": None,
+            "minio_metadata": None
+        }
+        
+        # 1. Milvus에서 삭제
+        try:
+            collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+            collection = get_collection(collection_name, dim=1024)
+            
+            expr = f'metadata["doc_id"] == "{doc_id}"'
+            
+            # 해당 문서의 청크 수 확인
+            search_result = collection.query(
+                expr=expr,
+                output_fields=["id"],
+                limit=1000
+            )
+            
+            chunk_count = len(search_result)
+            
+            if chunk_count == 0:
+                print(f"[CONSTITUTION-DELETE] No chunks found in Milvus for: {doc_id}")
+            else:
+                # 삭제 실행
+                collection.delete(expr)
+                collection.flush()
+                
+                deleted_items["milvus_chunks"] = chunk_count
+                print(f"[CONSTITUTION-DELETE] Deleted {chunk_count} chunks from Milvus")
+        
+        except Exception as e:
+            print(f"[CONSTITUTION-DELETE] Milvus deletion error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # 2. MinIO에서 메타데이터 조회 (PDF 경로 확인용)
+        minio_client = get_minio_client()
+        bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+        
+        # 국가 코드 추출 (doc_id 형식: KR_1987_a1b2c3d4)
+        country_code = doc_id.split('_')[0]
+        
+        # 메타데이터 경로
+        metadata_key = f"constitutions/{country_code}/metadata/{doc_id}.json"
+        
+        pdf_key = None
+        
+        try:
+            # 메타데이터 읽기
+            response = minio_client.get_object(bucket_name, metadata_key)
+            metadata_json = response.read().decode('utf-8')
+            metadata = json.loads(metadata_json)
+            
+            # PDF 경로 추출
+            pdf_key = metadata.get("minio_key")
+            
+            print(f"[CONSTITUTION-DELETE] Found metadata: {metadata_key}")
+            print(f"[CONSTITUTION-DELETE] PDF path: {pdf_key}")
+        
+        except Exception as e:
+            print(f"[CONSTITUTION-DELETE] Metadata not found: {metadata_key}")
+            print(f"[CONSTITUTION-DELETE] Will attempt to find PDF by pattern")
+        
+        # 3. MinIO에서 PDF 삭제
+        if pdf_key:
+            try:
+                minio_client.remove_object(bucket_name, pdf_key)
+                deleted_items["minio_pdf"] = pdf_key
+                print(f"[CONSTITUTION-DELETE] Deleted PDF: {pdf_key}")
+            except Exception as e:
+                print(f"[CONSTITUTION-DELETE] PDF deletion error: {e}")
+        else:
+            # 메타데이터가 없으면 패턴으로 검색
+            try:
+                prefix = f"constitutions/{country_code}/"
+                objects = minio_client.list_objects(bucket_name, prefix=prefix, recursive=True)
+                
+                for obj in objects:
+                    if doc_id in obj.object_name and obj.object_name.endswith('.pdf'):
+                        minio_client.remove_object(bucket_name, obj.object_name)
+                        deleted_items["minio_pdf"] = obj.object_name
+                        print(f"[CONSTITUTION-DELETE] Deleted PDF by pattern: {obj.object_name}")
+                        break
+            except Exception as e:
+                print(f"[CONSTITUTION-DELETE] Pattern-based PDF search error: {e}")
+        
+        # 4. MinIO에서 메타데이터 삭제
+        try:
+            minio_client.remove_object(bucket_name, metadata_key)
+            deleted_items["minio_metadata"] = metadata_key
+            print(f"[CONSTITUTION-DELETE] Deleted metadata: {metadata_key}")
+        except Exception as e:
+            print(f"[CONSTITUTION-DELETE] Metadata deletion error: {e}")
+        
+        # 5. 삭제 결과 확인
+        if deleted_items["milvus_chunks"] == 0 and not deleted_items["minio_pdf"] and not deleted_items["minio_metadata"]:
+            raise HTTPException(404, f"문서를 찾을 수 없습니다: {doc_id}")
+        
+        print(f"[CONSTITUTION-DELETE] Deletion completed for: {doc_id}")
+        
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "deleted_items": deleted_items,
+            "message": "헌법 문서가 완전히 삭제되었습니다."
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[CONSTITUTION-DELETE] Deletion failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"삭제 실패: {e}")
+
+
+@router.delete("/delete/country/{country_code}",
+    summary="특정 국가의 모든 헌법 문서 삭제"
+)
+async def delete_country_constitutions(country_code: str):
+    """
+    특정 국가의 모든 헌법 문서 일괄 삭제
+    """
+    try:
+        from app.services.country_registry import get_country, validate_country_code
+        
+        # 국가 코드 검증
+        if not validate_country_code(country_code):
+            raise HTTPException(400, f"유효하지 않은 국가 코드: {country_code}")
+        
+        country_info = get_country(country_code)
+        
+        print(f"[CONSTITUTION-DELETE] Starting bulk deletion for country: {country_code}")
+        
+        deleted_summary = {
+            "milvus_chunks": 0,
+            "minio_pdfs": 0,
+            "minio_metadata": 0
+        }
+        
+        deleted_doc_ids = []
+        
+        # 1. Milvus에서 해당 국가의 모든 문서 찾기
+        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+        collection = get_collection(collection_name, dim=1024)
+        
+        expr = f'metadata["country"] == "{country_code}" and metadata["doc_type"] == "constitution"'
+        
+        search_result = collection.query(
+            expr=expr,
+            output_fields=["metadata"],
+            limit=10000
+        )
+        doc_ids = set()
+        for item in search_result:
+            meta = item.get("metadata", {})
+            
+            if isinstance(meta, str):
+                import json
+                meta = json.loads(meta)
+            
+            doc_id = meta.get("doc_id")
+            if doc_id:
+                doc_ids.add(doc_id)
+        
+        print(f"[CONSTITUTION-DELETE] Found {len(doc_ids)} documents for {country_code}")
+        
+        # 2. 각 문서 삭제 (Milvus)
+        for doc_id in doc_ids:
+            try:
+                expr_doc = f'metadata["doc_id"] == "{doc_id}"'
+                
+                chunk_result = collection.query(
+                    expr=expr_doc,
+                    output_fields=["id"],
+                    limit=1000
+                )
+                chunk_count = len(chunk_result)
+                
+                if chunk_count > 0:
+                    collection.delete(expr_doc)
+                    deleted_summary["milvus_chunks"] += chunk_count
+                
+                deleted_doc_ids.append(doc_id)
+                
+            except Exception as e:
+                print(f"[CONSTITUTION-DELETE] Error deleting {doc_id}: {e}")
+        
+        collection.flush()
+        
+        # 3. MinIO에서 해당 국가 폴더 전체 삭제
+        minio_client = get_minio_client()
+        bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+        
+        prefix = f"constitutions/{country_code}/"
+        
+        try:
+            objects = minio_client.list_objects(bucket_name, prefix=prefix, recursive=True)
+            
+            for obj in objects:
+                minio_client.remove_object(bucket_name, obj.object_name)
+                
+                if obj.object_name.endswith('.pdf'):
+                    deleted_summary["minio_pdfs"] += 1
+                elif obj.object_name.endswith('.json'):
+                    deleted_summary["minio_metadata"] += 1
+                
+                print(f"[CONSTITUTION-DELETE] Deleted: {obj.object_name}")
+        
+        except Exception as e:
+            print(f"[CONSTITUTION-DELETE] MinIO bulk deletion error: {e}")
+        
+        print(f"[CONSTITUTION-DELETE] Bulk deletion completed for: {country_code}")
+        
+        return {
+            "success": True,
+            "country_code": country_code,
+            "country_name": country_info.name_ko,
+            "deleted_documents": len(deleted_doc_ids),
+            "deleted_doc_ids": list(deleted_doc_ids),
+            "deleted_items": deleted_summary,
+            "message": f"{country_info.name_ko}의 모든 헌법 문서({len(deleted_doc_ids)}개)가 삭제되었습니다."
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[CONSTITUTION-DELETE] Bulk deletion failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"일괄 삭제 실패: {e}")
+
+
+@router.get("/list",
+    summary="업로드된 헌법 문서 목록 조회"
+)
+async def list_constitutions(
+    country: Optional[str] = None,
+    limit: int = 100
+):
+    """
+    업로드된 헌법 문서 목록 조회
+    
+    metadata의 doc_id를 기준으로 그룹화
+    """
+    try:
+        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+        collection = get_collection(collection_name, dim=1024)
+        
+        # 필터 구성
+        if country:
+            expr = f'metadata["doc_type"] == "constitution" and metadata["country"] == "{country}"'
+        else:
+            expr = 'metadata["doc_type"] == "constitution"'
+        
+        # 검색
+        results = collection.query(
+            expr=expr,
+            output_fields=["metadata"],
+            limit=limit * 10
+        )
+        
+        # doc_id별로 그룹화
+        documents = {}
+        
+        for item in results:
+            meta = item.get("metadata", {})
+            
+            # JSON 문자열인 경우 파싱
+            if isinstance(meta, str):
+                import json
+                meta = json.loads(meta)
+            
+            # metadata에서 doc_id 직접 추출
+            doc_id = meta.get("doc_id")
+            
+            if not doc_id:
+                continue  # doc_id가 없으면 스킵
+            
+            if doc_id not in documents:
+                documents[doc_id] = {
+                    "doc_id": doc_id,
+                    "country_code": meta.get("country", ""),
+                    "country_name": meta.get("country_name_ko", ""),
+                    "continent": meta.get("continent", ""),
+                    "title": meta.get("constitution_title", ""),
+                    "version": meta.get("constitution_version"),
+                    "is_bilingual": meta.get("is_bilingual", False),
+                    "chunk_count": 0,
+                    "indexed_at": meta.get("indexed_at", ""),
+                    "minio_key": meta.get("minio_key", "")
+                }
+            
+            documents[doc_id]["chunk_count"] += 1
+        
+        # 리스트로 변환 (최신순 정렬)
+        doc_list = sorted(
+            documents.values(),
+            key=lambda x: x.get("indexed_at", ""),
+            reverse=True
+        )[:limit]
+        
+        return {
+            "success": True,
+            "total": len(doc_list),
+            "documents": doc_list
+        }
+    
+    except Exception as e:
+        print(f"[CONSTITUTION-LIST] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"목록 조회 실패: {e}")
 # ==================== 비교 검색 엔드포인트 ====================
 
 @router.post("/comparative-search", 
