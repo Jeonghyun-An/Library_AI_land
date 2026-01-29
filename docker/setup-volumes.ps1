@@ -1,5 +1,6 @@
 # setup-volumes.ps1
 # External 볼륨과 네트워크 생성 스크립트 - 처음에 한번만 실행
+# 실행 명령어(README 참고): .\setup-volumes.ps1
 
 Write-Host "=== Library RAG System Setup ===" -ForegroundColor Green
 

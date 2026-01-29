@@ -2,10 +2,10 @@
 <template>
   <div class="min-h-screen flex flex-col">
     <!-- Header -->
+    <!--
     <header class="bg-white border-b border-gray-200 sticky top-0 z-50">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex justify-between items-center h-16">
-          <!-- Logo -->
           <NuxtLink to="/law" class="flex items-center space-x-3">
             <img
               src="/img/layout/hd_logo.svg"
@@ -14,8 +14,7 @@
             />
           </NuxtLink>
 
-          <!-- Navigation -->
-          <!-- <nav class="hidden md:flex items-center space-x-6">
+          <nav class="hidden md:flex items-center space-x-6">
             <NuxtLink
               to="/"
               class="text-gray-700 hover:text-indigo-600 transition"
@@ -40,9 +39,8 @@
             >
               About
             </NuxtLink>
-          </nav> -->
+          </nav>
 
-          <!-- Mobile Menu Button -->
           <button
             @click="mobileMenuOpen = !mobileMenuOpen"
             class="md:hidden p-2"
@@ -63,7 +61,6 @@
           </button>
         </div>
 
-        <!-- Mobile Menu -->
         <div v-if="mobileMenuOpen" class="md:hidden pb-4">
           <NuxtLink
             to="/"
@@ -88,6 +85,7 @@
         </div>
       </div>
     </header>
+    -->
 
     <!-- Main Content -->
     <main class="flex-1">
