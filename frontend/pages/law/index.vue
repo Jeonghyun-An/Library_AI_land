@@ -1,641 +1,612 @@
 <template>
-  <div class="constitution_search_page">
+  <div class="flex min-h-screen bg-gray-50">
     <!-- 헤더 -->
-    <header class="search_header">
-      <div class="inner">
-        <div class="header_content">
-          <div class="logo">
-            <img src="/img/main/txt_search_main.svg" alt="헌법 비교 검색" />
-          </div>
-          <div class="header_actions">
-            <button class="btn_lang" @click="toggleLanguage">
-              <img src="/img/icon/ic_lang_b.svg" alt="" />
-              {{ currentLanguage === "ko" ? "한국어" : "English" }}
-            </button>
-            <NuxtLink to="/" class="btn_home">
-              <i class="fas fa-home"></i>
-            </NuxtLink>
-          </div>
-        </div>
-      </div>
-    </header>
+    <header
+      class="fixed top-0 left-0 right-0 h-16 bg-white border-b border-gray-200 z-50"
+    >
+      <div class="flex items-center justify-between h-full px-5">
+        <!-- 햄버거 메뉴 -->
+        <button
+          @click="toggleSidebar"
+          class="w-10 h-10 flex items-center justify-center rounded hover:bg-gray-100 transition"
+          aria-label="메뉴"
+        >
+          <i class="fas fa-bars text-xl text-gray-700"></i>
+        </button>
 
-    <!-- 검색 영역 -->
-    <section class="search_section">
-      <div class="inner">
-        <div class="search_main">
-          <h1 class="search_title">AI 헌법 비교 검색 시스템</h1>
-          <p class="search_description">
-            사용자의 질문에 대한민국 헌법과 세계 각국 헌법을 비교하여
-            분석합니다.
-          </p>
-
-          <!-- 검색 박스 -->
-          <div class="search_box_wrap">
-            <div class="search_condition_wrap" v-if="showFilters">
-              <div class="select_box">
-                <select v-model="searchFilters.top_k" title="검색 결과 수">
-                  <option :value="5">상위 5개</option>
-                  <option :value="10">상위 10개</option>
-                  <option :value="20">상위 20개</option>
-                </select>
-              </div>
-              <div class="form_check">
-                <input
-                  type="checkbox"
-                  id="use_reranking"
-                  v-model="searchFilters.use_reranking"
-                />
-                <label for="use_reranking">리랭킹 사용</label>
-              </div>
-            </div>
-
-            <div class="search_box">
-              <button
-                class="btn_filter"
-                @click="showFilters = !showFilters"
-                :class="{ active: showFilters }"
-                aria-label="검색 조건 설정"
-              >
-                <i class="fas fa-sliders-h"></i>
-              </button>
-
-              <input
-                type="text"
-                v-model="query"
-                @keyup.enter="handleSearch"
-                placeholder="연구 질문을 입력하세요. (예: 국민의 기본권은 어떻게 보장되나요?)"
-                class="search_input"
-                :disabled="isSearching"
-              />
-
-              <button
-                class="btn_search"
-                @click="handleSearch"
-                :disabled="isSearching || !query.trim()"
-              >
-                <i v-if="!isSearching" class="fas fa-search"></i>
-                <i v-else class="fas fa-spinner fa-spin"></i>
-                {{ isSearching ? "검색 중..." : "검색" }}
-              </button>
-            </div>
-
-            <!-- 에러 메시지 -->
-            <div v-if="error" class="error_message">
-              <i class="fas fa-exclamation-circle"></i>
-              {{ error }}
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 검색 결과 영역 -->
-    <section v-if="hasResults" class="results_section">
-      <div class="inner_wide">
-        <!-- 국가 선택 -->
-        <div class="country_selector_wrap">
-          <div class="country_selector_header">
-            <h2>비교 국가 선택</h2>
-            <p>
-              좌측: {{ getReferenceCountryName() }} | 우측:
-              {{ getComparisonCountryName() }}
-            </p>
-          </div>
-          <CountrySelector
-            v-model="comparisonCountry"
-            :countries="formattedCountries"
-            @update:modelValue="handleCountryChange"
+        <!-- 로고 -->
+        <div class="logo">
+          <img
+            src="/img/layout/hd_logo.svg"
+            alt="LANDSOFT AI 헌법 특화 에이전트"
+            class="hd_logo view_ctr"
           />
         </div>
 
-        <!-- PDF 비교 뷰 -->
-        <div class="pdf_comparison_wrap">
-          <!-- 좌측: 대한민국 헌법 -->
-          <div class="pdf_panel left">
-            <PDFViewer
-              :pdf-url="getReferencePDFUrl()"
-              :title="`대한민국 헌법`"
-              :country-code="referenceCountry"
-              :search-results="referenceResults"
+        <!-- 사용자 메뉴 -->
+        <button
+          @click="toggleUserMenu"
+          class="flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-md hover:bg-gray-50 transition"
+        >
+          <i class="fas fa-user text-sm"></i>
+          <span class="text-sm">최승환 님</span>
+          <i class="fas fa-chevron-down text-xs"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- 사이드바 -->
+    <aside
+      :class="[
+        'fixed top-16 left-0 w-80 h-[calc(100vh-4rem)] bg-white border-r border-gray-200 z-40 overflow-y-auto transition-transform duration-300',
+        isSidebarOpen ? 'translate-x-0' : '-translate-x-full',
+      ]"
+    >
+      <div
+        class="flex items-center justify-between p-5 border-b border-gray-200"
+      >
+        <h2 class="text-lg font-semibold">질의 히스토리</h2>
+        <button
+          @click="toggleSidebar"
+          class="w-8 h-8 flex items-center justify-center rounded hover:bg-gray-100"
+        >
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+
+      <div class="p-5">
+        <!-- 오늘 히스토리 -->
+        <div class="mb-6">
+          <h3 class="text-sm font-semibold text-gray-600 mb-3">오늘</h3>
+          <div
+            v-for="(item, idx) in todayHistory"
+            :key="`today-${idx}`"
+            @click="loadHistory(item, idx)"
+            :class="[
+              'flex items-center gap-3 p-3 rounded-md cursor-pointer transition mb-1',
+              selectedHistory === idx
+                ? 'bg-blue-50 text-blue-600'
+                : 'hover:bg-gray-100',
+            ]"
+          >
+            <i class="fas fa-clock text-sm text-gray-400"></i>
+            <span class="text-sm flex-1 truncate">{{ item.query }}</span>
+          </div>
+        </div>
+
+        <!-- 최근 히스토리 -->
+        <div class="mb-6">
+          <h3 class="text-sm font-semibold text-gray-600 mb-3">
+            주요 국가 법령 비교/시사 오늘 비교 해석
+          </h3>
+          <div
+            v-for="(item, idx) in recentHistory"
+            :key="`recent-${idx}`"
+            @click="loadHistory(item, idx + 100)"
+            class="flex items-center gap-3 p-3 rounded-md cursor-pointer hover:bg-gray-100 transition mb-1"
+          >
+            <i class="fas fa-history text-sm text-gray-400"></i>
+            <span class="text-sm flex-1 truncate">{{ item.query }}</span>
+          </div>
+        </div>
+
+        <!-- 하단 안내 -->
+        <div class="mt-8 pt-5 border-t border-gray-200">
+          <p class="text-xs text-gray-600 mb-3">
+            AI가 생성한 콘텐츠입니다. 콘텐츠의 정확성은 보장되지 않을 수
+            있습니다.
+          </p>
+          <div class="space-y-2">
+            <a
+              href="#"
+              class="flex items-center gap-2 text-xs text-gray-700 hover:text-blue-600 py-1"
+            >
+              <i class="fas fa-info-circle"></i>
+              AI 언어모델 이용지침 소개
+            </a>
+            <a
+              href="#"
+              class="flex items-center gap-2 text-xs text-gray-700 hover:text-blue-600 py-1"
+            >
+              <i class="fas fa-exclamation-triangle"></i>
+              개인정보 보호 및 면책 고지
+            </a>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 메인 컨텐츠 -->
+    <main
+      :class="[
+        'flex-1 mt-16 transition-all duration-300',
+        isSidebarOpen ? 'ml-80' : 'ml-0',
+      ]"
+    >
+      <!-- 검색 전 초기 화면 -->
+      <div v-if="!hasSearched" class="max-w-3xl mx-auto px-5 py-20">
+        <!-- 히어로 섹션 -->
+        <div class="text-center mb-12">
+          <div
+            class="w-20 h-20 mx-auto mb-6 flex items-center justify-center bg-gradient-to-br from-cyan-400 to-blue-500 rounded-full"
+          >
+            <i class="fas fa-gavel text-4xl text-white"></i>
+          </div>
+          <h1 class="text-4xl font-bold text-gray-900 mb-4">
+            AI 헌법 특화 에이전트
+          </h1>
+          <p class="text-base text-gray-600 leading-relaxed">
+            우리나라 헌법과 국군의 헌법과 비교 분석해주는 법령도서관의 생성형
+            인공지능 서비스입니다.
+          </p>
+        </div>
+
+        <!-- 검색 박스 -->
+        <div class="mb-12">
+          <div
+            class="flex items-center bg-white border-2 border-gray-200 rounded-xl p-1 focus-within:border-blue-500 transition"
+          >
+            <button
+              @click="toggleSearchFilter"
+              class="w-10 h-10 flex items-center justify-center rounded-lg hover:bg-gray-100 transition"
+            >
+              <i class="fas fa-sliders-h text-gray-600"></i>
+            </button>
+
+            <input
+              type="text"
+              v-model="query"
+              @keyup.enter="handleSearch"
+              placeholder="질문을 입력해주세요."
+              class="flex-1 px-4 py-3 text-base outline-none"
+              :disabled="isSearching"
             />
+
+            <button
+              @click="handleSearch"
+              :disabled="isSearching || !query.trim()"
+              class="w-12 h-12 flex items-center justify-center bg-gradient-to-br from-cyan-400 to-blue-500 text-white rounded-lg hover:shadow-lg hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >
+              <i v-if="!isSearching" class="fas fa-search"></i>
+              <i v-else class="fas fa-spinner fa-spin"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- 질문 예시 -->
+        <div class="mb-8">
+          <div class="flex items-center justify-between mb-5">
+            <h3 class="text-lg font-semibold">질문 예시</h3>
+            <a
+              href="#"
+              class="flex items-center gap-1.5 text-sm text-blue-600 hover:underline"
+            >
+              <i class="fas fa-lightbulb"></i>
+              AI 언어모델 이용지침 소개
+            </a>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <button
+              v-for="(example, idx) in exampleQuestions"
+              :key="idx"
+              @click="selectExample(example)"
+              class="flex items-start justify-between p-4 bg-white border border-gray-200 rounded-lg text-left hover:border-blue-500 hover:bg-blue-50 hover:-translate-y-0.5 transition"
+            >
+              <span class="text-sm text-gray-700 leading-relaxed flex-1">
+                {{ example }}
+              </span>
+              <i class="fas fa-arrow-right text-gray-400 ml-3 mt-1"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- 에러 메시지 -->
+        <div
+          v-if="error"
+          class="flex items-center gap-3 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700"
+        >
+          <i class="fas fa-exclamation-circle"></i>
+          <span class="text-sm">{{ error }}</span>
+        </div>
+      </div>
+
+      <!-- 검색 결과 화면 -->
+      <div v-else class="p-5">
+        <!-- 검색 박스 (상단 고정) -->
+        <div class="max-w-3xl mx-auto mb-8">
+          <div
+            class="flex items-center bg-white border-2 border-gray-200 rounded-xl p-1 focus-within:border-blue-500 transition"
+          >
+            <button
+              @click="toggleSearchFilter"
+              class="w-10 h-10 flex items-center justify-center rounded-lg hover:bg-gray-100 transition"
+            >
+              <i class="fas fa-sliders-h text-gray-600"></i>
+            </button>
+
+            <input
+              type="text"
+              v-model="query"
+              @keyup.enter="handleSearch"
+              placeholder="질문을 입력해주세요."
+              class="flex-1 px-4 py-3 text-base outline-none"
+              :disabled="isSearching"
+            />
+
+            <button
+              @click="handleSearch"
+              :disabled="isSearching || !query.trim()"
+              class="w-12 h-12 flex items-center justify-center bg-gradient-to-br from-cyan-400 to-blue-500 text-white rounded-lg hover:shadow-lg hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >
+              <i v-if="!isSearching" class="fas fa-search"></i>
+              <i v-else class="fas fa-spinner fa-spin"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- AI 요약 -->
+        <div
+          v-if="searchResults?.summary"
+          class="max-w-5xl mx-auto mb-8 p-6 bg-white rounded-xl shadow-sm"
+        >
+          <div class="flex items-center gap-3 mb-4">
+            <i class="fas fa-robot text-2xl text-blue-600"></i>
+            <h3 class="text-lg font-semibold">AI 비교 요약</h3>
+          </div>
+          <p class="text-sm text-gray-700 leading-relaxed">
+            {{ searchResults.summary }}
+          </p>
+        </div>
+
+        <!-- 검색 메타 정보 -->
+        <div
+          class="max-w-5xl mx-auto mb-8 flex gap-6 px-6 py-4 bg-white rounded-lg"
+        >
+          <div class="flex gap-2">
+            <span class="text-sm text-gray-600">검색 시간:</span>
+            <span class="text-sm font-semibold text-gray-900">
+              {{ searchResults?.search_time_ms?.toFixed(0) }}ms
+            </span>
+          </div>
+          <div class="flex gap-2">
+            <span class="text-sm text-gray-600">한국 헌법:</span>
+            <span class="text-sm font-semibold text-gray-900">
+              {{ searchResults?.total_korean_found }}건
+            </span>
+          </div>
+          <div class="flex gap-2">
+            <span class="text-sm text-gray-600">외국 헌법:</span>
+            <span class="text-sm font-semibold text-gray-900">
+              {{ searchResults?.total_foreign_found }}건
+            </span>
+          </div>
+        </div>
+
+        <!-- 국가 선택 -->
+        <div class="max-w-5xl mx-auto mb-8 p-6 bg-white rounded-xl">
+          <h3 class="text-lg font-semibold mb-5">국가선택</h3>
+
+          <!-- 대륙 탭 -->
+          <div class="flex gap-2 mb-5">
+            <button
+              v-for="continent in continents"
+              :key="continent.id"
+              @click="selectContinent(continent.id)"
+              :class="[
+                'px-4 py-2 border rounded-md text-sm font-medium transition',
+                selectedContinent === continent.id
+                  ? 'bg-blue-500 text-white border-blue-500'
+                  : 'bg-white text-gray-700 border-gray-300 hover:border-blue-500 hover:bg-blue-50',
+              ]"
+            >
+              {{ continent.name }}
+            </button>
+          </div>
+
+          <!-- 국가 그리드 -->
+          <div class="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
+            <button
+              v-for="country in filteredCountries"
+              :key="country.code"
+              @click="selectCountry(country.code)"
+              :class="[
+                'flex flex-col items-center gap-2 p-3 border rounded-lg transition',
+                selectedCountry === country.code
+                  ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-200'
+                  : 'border-gray-200 hover:border-blue-500 hover:bg-blue-50',
+              ]"
+            >
+              <img
+                :src="`/img/flags/${country.code.toLowerCase()}.png`"
+                :alt="country.name"
+                @error="handleFlagError"
+                class="w-12 h-9 object-cover rounded border border-gray-200"
+              />
+              <span class="text-xs text-gray-700 text-center">
+                {{ country.name }}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <!-- PDF 비교 뷰 -->
+        <div class="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- 좌측: 대한민국 헌법 -->
+          <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+            <div class="px-5 py-4 bg-gray-50 border-b border-gray-200">
+              <h3 class="flex items-center gap-2 font-semibold">
+                <i class="fas fa-file-pdf text-blue-600"></i>
+                대한민국 헌법
+              </h3>
+            </div>
+            <div class="p-5 max-h-[600px] overflow-y-auto">
+              <div v-if="koreanResults.length > 0" class="space-y-4">
+                <div
+                  v-for="(result, idx) in koreanResults"
+                  :key="idx"
+                  @click="scrollToResult('korean', Number(idx))"
+                  class="flex gap-4 p-4 border border-gray-200 rounded-lg cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition"
+                >
+                  <div class="flex-shrink-0">
+                    <div
+                      class="w-14 h-14 flex items-center justify-center bg-gradient-to-br from-cyan-400 to-blue-500 text-white rounded-full font-bold text-base"
+                    >
+                      {{ Math.round(result.score * 100) }}
+                    </div>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-semibold text-gray-900 mb-2">
+                      {{ result.display_path }}
+                    </div>
+                    <div
+                      class="text-xs text-gray-600 leading-relaxed mb-2 line-clamp-3"
+                    >
+                      {{ result.korean_text?.substring(0, 150) }}...
+                    </div>
+                    <div class="text-xs text-gray-400">
+                      페이지 {{ result.page_korean || result.page }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div
+                v-else
+                class="flex flex-col items-center justify-center py-20 text-gray-400"
+              >
+                <i class="fas fa-inbox text-5xl mb-4"></i>
+                <p class="text-sm">검색 결과가 없습니다</p>
+              </div>
+            </div>
           </div>
 
           <!-- 우측: 비교 국가 헌법 -->
-          <div class="pdf_panel right">
-            <PDFViewer
-              :pdf-url="getComparisonPDFUrl()"
-              :title="`${getComparisonCountryName()} 헌법`"
-              :country-code="comparisonCountry"
-              :search-results="comparisonResults"
-            />
-          </div>
-        </div>
-
-        <!-- 검색 통계 -->
-        <div class="search_stats">
-          <div class="stat_item">
-            <i class="fas fa-clock"></i>
-            <span
-              >검색 시간: {{ searchResults?.search_time_ms.toFixed(0) }}ms</span
-            >
-          </div>
-          <div class="stat_item">
-            <i class="fas fa-file-alt"></i>
-            <span>총 {{ searchResults?.total_found }}개 결과</span>
-          </div>
-          <div class="stat_item">
-            <i class="fas fa-language"></i>
-            <span
-              >감지된 언어:
-              {{ searchResults?.query_analysis.detected_language }}</span
-            >
+          <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+            <div class="px-5 py-4 bg-gray-50 border-b border-gray-200">
+              <h3 class="flex items-center gap-2 font-semibold">
+                <i class="fas fa-file-pdf text-blue-600"></i>
+                {{ getSelectedCountryName() }} 헌법
+              </h3>
+            </div>
+            <div class="p-5 max-h-[600px] overflow-y-auto">
+              <div v-if="foreignResults.length > 0" class="space-y-4">
+                <div
+                  v-for="(result, idx) in foreignResults"
+                  :key="idx"
+                  @click="scrollToResult('foreign', Number(idx))"
+                  class="flex gap-4 p-4 border border-gray-200 rounded-lg cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition"
+                >
+                  <div class="flex-shrink-0">
+                    <div
+                      class="w-14 h-14 flex items-center justify-center bg-gradient-to-br from-cyan-400 to-blue-500 text-white rounded-full font-bold text-base"
+                    >
+                      {{ Math.round(result.score * 100) }}
+                    </div>
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-xs text-gray-500 mb-1">
+                      {{ result.country_name }}
+                    </div>
+                    <div class="text-sm font-semibold text-gray-900 mb-2">
+                      {{ result.display_path }}
+                    </div>
+                    <div
+                      v-if="result.has_korean"
+                      class="text-xs text-gray-600 leading-relaxed mb-1 line-clamp-2"
+                    >
+                      [한글] {{ result.korean_text?.substring(0, 100) }}...
+                    </div>
+                    <div
+                      v-if="result.has_english"
+                      class="text-xs text-gray-600 leading-relaxed mb-2 line-clamp-2"
+                    >
+                      [영어] {{ result.english_text?.substring(0, 100) }}...
+                    </div>
+                    <div class="text-xs text-gray-400">
+                      페이지
+                      {{
+                        result.page_english || result.page_korean || result.page
+                      }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div
+                v-else
+                class="flex flex-col items-center justify-center py-20 text-gray-400"
+              >
+                <i class="fas fa-inbox text-5xl mb-4"></i>
+                <p class="text-sm">검색 결과가 없습니다</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </section>
-
-    <!-- 사용 가이드 (결과 없을 때) -->
-    <section v-else class="guide_section">
-      <div class="inner">
-        <div class="guide_content">
-          <div class="guide_item">
-            <div class="guide_icon">
-              <i class="fas fa-search"></i>
-            </div>
-            <h3>검색 방법</h3>
-            <p>궁금한 헌법 내용을 자연어로 질문하세요</p>
-          </div>
-          <div class="guide_item">
-            <div class="guide_icon">
-              <i class="fas fa-balance-scale"></i>
-            </div>
-            <h3>비교 분석</h3>
-            <p>대한민국과 다른 국가의 헌법을 동시에 비교합니다</p>
-          </div>
-          <div class="guide_item">
-            <div class="guide_icon">
-              <i class="fas fa-highlight"></i>
-            </div>
-            <h3>하이라이팅</h3>
-            <p>관련도가 높은 조항을 자동으로 강조합니다</p>
-          </div>
-        </div>
-      </div>
-    </section>
+    </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
-import { useConstitutionSearch } from "~/composables/useConstitutionSearch";
-import CountrySelector from "~/components/CountrySelector.vue";
-import PDFViewer from "~/components/PDFViewer.vue";
+import { ref, computed } from "vue";
 
-const {
-  query,
-  isSearching,
-  searchResults,
-  error,
-  referenceCountry,
-  comparisonCountry,
-  availableCountries,
-  searchFilters,
-  hasResults,
-  referenceResults,
-  comparisonResults,
-  executeSearch,
-  loadAvailableCountries,
-  changeComparisonCountry,
-} = useConstitutionSearch();
+const config = useRuntimeConfig();
+const apiBase = config.public.apiBase;
 
-const currentLanguage = ref("ko");
-const showFilters = ref(false);
+// UI 상태
+const isSidebarOpen = ref(false);
+const hasSearched = ref(false);
+const isSearching = ref(false);
+const selectedHistory = ref<number | null>(null);
+const selectedContinent = ref("all");
+const selectedCountry = ref("GH");
 
-// 국가 정보 포매팅 (CountrySelector용)
-const formattedCountries = computed(() => {
-  return availableCountries.value.map((country) => ({
-    code: country.country_code,
-    name: country.country_name,
-    region: inferRegion(country.country_code),
-    version: country.version,
-  }));
+// 검색 상태
+const query = ref("");
+const searchResults = ref<any>(null);
+const error = ref<string | null>(null);
+
+// 히스토리 데이터
+const todayHistory = ref([
+  { query: "인간의 존엄성과 권리의 자국의 헌법 조항 알려줘." },
+]);
+
+const recentHistory = ref([
+  { query: "주요 국가 법령 분석에 자유 오늘 비교 해석" },
+  { query: "주요 국가 법령 비교/시사 오늘 비교 해석" },
+]);
+
+// 예시 질문
+const exampleQuestions = ref([
+  "인간의 존엄성과 권리의 각 국의 헌법 조항 알려줘.",
+  "주요 국가 법령 분석에 자유 오늘 비교 해석. (권리 국가 독립 보장 등등)",
+  "인간의 존엄성과 권리의 각 국의 헌법 조항 알려줘. 인간의 존엄성과 권리의 각 국의 헌법 조항 알려줘.",
+  "인간의 존엄성과 권리의 각 국의 헌법 조항 알려줘.",
+]);
+
+// 대륙 목록
+const continents = ref([
+  { id: "all", name: "전체" },
+  { id: "africa", name: "아프리카" },
+  { id: "asia", name: "아시아" },
+  { id: "europe", name: "유럽" },
+  { id: "americas", name: "아메리카" },
+]);
+
+// 국가 목록
+const allCountries = ref([
+  { code: "GH", name: "가나", continent: "africa" },
+  { code: "NG", name: "나이지리아", continent: "africa" },
+  { code: "ZA", name: "남아공", continent: "africa" },
+  { code: "RW", name: "르완다", continent: "africa" },
+  { code: "US", name: "미국", continent: "americas" },
+  { code: "JP", name: "일본", continent: "asia" },
+  { code: "DE", name: "독일", continent: "europe" },
+  { code: "FR", name: "프랑스", continent: "europe" },
+]);
+
+// 계산된 속성
+const koreanResults = computed(() => {
+  return searchResults.value?.korean_results || [];
 });
 
-/**
- * 검색 실행
- */
+const foreignResults = computed(() => {
+  if (!searchResults.value) return [];
+  return (
+    searchResults.value.foreign_results?.filter(
+      (r: any) => r.country === selectedCountry.value,
+    ) || []
+  );
+});
+
+const filteredCountries = computed(() => {
+  if (selectedContinent.value === "all") {
+    return allCountries.value;
+  }
+  return allCountries.value.filter(
+    (c) => c.continent === selectedContinent.value,
+  );
+});
+
+// 메서드
+const toggleSidebar = () => {
+  isSidebarOpen.value = !isSidebarOpen.value;
+};
+
+const toggleUserMenu = () => {
+  console.log("User menu toggled");
+};
+
+const toggleSearchFilter = () => {
+  console.log("Search filter toggled");
+};
+
 const handleSearch = async () => {
-  await executeSearch();
+  if (!query.value.trim()) {
+    error.value = "검색어를 입력해주세요";
+    return;
+  }
+
+  isSearching.value = true;
+  error.value = null;
+  hasSearched.value = true;
+
+  try {
+    const response = await $fetch<any>(`${apiBase}/api/constitution/search`, {
+      method: "POST",
+      body: {
+        query: query.value,
+        korean_top_k: 3,
+        foreign_top_k: 5,
+        target_country: selectedCountry.value,
+        generate_summary: true,
+      },
+    });
+
+    searchResults.value = response;
+    todayHistory.value.unshift({ query: query.value });
+  } catch (err: any) {
+    error.value = err.message || "검색 중 오류가 발생했습니다";
+    console.error("Search error:", err);
+  } finally {
+    isSearching.value = false;
+  }
 };
 
-/**
- * 비교 국가 변경
- */
-const handleCountryChange = async (countryCode: string) => {
-  await changeComparisonCountry(countryCode);
+const selectExample = (example: string) => {
+  query.value = example;
+  handleSearch();
 };
 
-/**
- * 언어 토글
- */
-const toggleLanguage = () => {
-  currentLanguage.value = currentLanguage.value === "ko" ? "en" : "ko";
+const loadHistory = (item: any, idx: number) => {
+  selectedHistory.value = idx;
+  query.value = item.query;
+  handleSearch();
 };
 
-/**
- * PDF URL 생성
- */
-const getReferencePDFUrl = () => {
-  return `/pdfs/constitutions/${referenceCountry.value}.pdf`;
+const selectContinent = (continentId: string) => {
+  selectedContinent.value = continentId;
 };
 
-const getComparisonPDFUrl = () => {
-  return `/pdfs/constitutions/${comparisonCountry.value}.pdf`;
+const selectCountry = async (countryCode: string) => {
+  selectedCountry.value = countryCode;
+  if (hasSearched.value) {
+    await handleSearch();
+  }
 };
 
-/**
- * 국가명 조회
- */
-const getReferenceCountryName = () => {
-  const country = availableCountries.value.find(
-    (c) => c.country_code === referenceCountry.value,
+const getSelectedCountryName = () => {
+  const country = allCountries.value.find(
+    (c) => c.code === selectedCountry.value,
   );
-  return country?.country_name || "대한민국";
+  return country?.name || "외국";
 };
 
-const getComparisonCountryName = () => {
-  const country = availableCountries.value.find(
-    (c) => c.country_code === comparisonCountry.value,
-  );
-  return country?.country_name || "미국";
+const handleFlagError = (event: Event) => {
+  const target = event.target as HTMLImageElement;
+  target.src = "/img/flags/default.png";
 };
 
-/**
- * 지역 추론 (국가 코드 기반)
- */
-const inferRegion = (code: string): string => {
-  const asiaCountries = ["KR", "JP", "CN", "IN", "TH", "VN", "PH"];
-  const europeCountries = ["UK", "FR", "DE", "IT", "ES", "NL", "SE"];
-  const americasCountries = ["US", "CA", "MX", "BR", "AR", "CL"];
-  const africaCountries = ["ZA", "NG", "EG", "KE", "GH"];
-  const oceaniaCountries = ["AU", "NZ"];
-
-  if (asiaCountries.includes(code)) return "asia";
-  if (europeCountries.includes(code)) return "europe";
-  if (americasCountries.includes(code)) return "americas";
-  if (africaCountries.includes(code)) return "africa";
-  if (oceaniaCountries.includes(code)) return "oceania";
-
-  return "all";
+const scrollToResult = (type: "korean" | "foreign", index: number) => {
+  console.log(`Scroll to ${type} result ${index}`);
 };
-
-onMounted(async () => {
-  await loadAvailableCountries();
-});
 </script>
-
-<style scoped>
-.constitution_search_page {
-  min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-
-/* 헤더 */
-.search_header {
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-
-.header_content {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 0;
-}
-
-.logo img {
-  height: 40px;
-}
-
-.header_actions {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.btn_lang,
-.btn_home {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: white;
-  cursor: pointer;
-  transition: all 0.2s;
-  font-size: 14px;
-  color: #374151;
-  text-decoration: none;
-}
-
-.btn_lang:hover,
-.btn_home:hover {
-  background: #f3f4f6;
-  border-color: #2563eb;
-}
-
-/* 검색 영역 */
-.search_section {
-  padding: 80px 0;
-}
-
-.search_main {
-  text-align: center;
-  max-width: 800px;
-  margin: 0 auto;
-}
-
-.search_title {
-  font-size: 48px;
-  font-weight: 700;
-  color: white;
-  margin: 0 0 16px 0;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-
-.search_description {
-  font-size: 18px;
-  color: rgba(255, 255, 255, 0.9);
-  margin: 0 0 40px 0;
-}
-
-.search_box_wrap {
-  background: white;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-}
-
-.search_condition_wrap {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  margin-bottom: 16px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #e5e7eb;
-}
-
-.select_box select {
-  padding: 8px 12px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.form_check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.search_box {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.btn_filter {
-  padding: 12px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: white;
-  cursor: pointer;
-  transition: all 0.2s;
-  flex-shrink: 0;
-}
-
-.btn_filter:hover,
-.btn_filter.active {
-  background: #f3f4f6;
-  border-color: #2563eb;
-  color: #2563eb;
-}
-
-.search_input {
-  flex: 1;
-  padding: 14px 20px;
-  border: 2px solid #e5e7eb;
-  border-radius: 8px;
-  font-size: 16px;
-  transition: all 0.2s;
-}
-
-.search_input:focus {
-  outline: none;
-  border-color: #2563eb;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
-}
-
-.search_input:disabled {
-  background: #f9fafb;
-  cursor: not-allowed;
-}
-
-.btn_search {
-  padding: 14px 32px;
-  border: none;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  font-size: 16px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.btn_search:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-}
-
-.btn_search:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.error_message {
-  margin-top: 16px;
-  padding: 12px;
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  border-radius: 6px;
-  color: #dc2626;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* 결과 영역 */
-.results_section {
-  padding: 40px 0;
-  background: white;
-}
-
-.inner_wide {
-  max-width: 1600px;
-  margin: 0 auto;
-  padding: 0 20px;
-}
-
-.country_selector_wrap {
-  margin-bottom: 32px;
-  background: white;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-}
-
-.country_selector_header {
-  margin-bottom: 20px;
-}
-
-.country_selector_header h2 {
-  font-size: 24px;
-  font-weight: 700;
-  color: #1f2937;
-  margin: 0 0 8px 0;
-}
-
-.country_selector_header p {
-  font-size: 14px;
-  color: #6b7280;
-  margin: 0;
-}
-
-.pdf_comparison_wrap {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 24px;
-  margin-bottom: 32px;
-}
-
-.pdf_panel {
-  height: 800px;
-}
-
-.search_stats {
-  display: flex;
-  justify-content: center;
-  gap: 32px;
-  padding: 20px;
-  background: #f9fafb;
-  border-radius: 8px;
-}
-
-.stat_item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  color: #6b7280;
-}
-
-.stat_item i {
-  color: #2563eb;
-}
-
-/* 가이드 영역 */
-.guide_section {
-  padding: 80px 0;
-}
-
-.guide_content {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 32px;
-  max-width: 1200px;
-  margin: 0 auto;
-}
-
-.guide_item {
-  text-align: center;
-  padding: 32px;
-  background: rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(10px);
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  transition: all 0.3s;
-}
-
-.guide_item:hover {
-  transform: translateY(-8px);
-  background: rgba(255, 255, 255, 0.15);
-}
-
-.guide_icon {
-  width: 80px;
-  height: 80px;
-  margin: 0 auto 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 50%;
-  font-size: 32px;
-  color: white;
-}
-
-.guide_item h3 {
-  font-size: 24px;
-  font-weight: 600;
-  color: white;
-  margin: 0 0 12px 0;
-}
-
-.guide_item p {
-  font-size: 16px;
-  color: rgba(255, 255, 255, 0.9);
-  margin: 0;
-}
-
-/* 반응형 */
-@media (max-width: 1200px) {
-  .pdf_comparison_wrap {
-    grid-template-columns: 1fr;
-  }
-
-  .guide_content {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 768px) {
-  .search_title {
-    font-size: 32px;
-  }
-
-  .search_box {
-    flex-direction: column;
-  }
-
-  .btn_search {
-    width: 100%;
-  }
-
-  .search_stats {
-    flex-direction: column;
-    gap: 12px;
-  }
-}
-</style>
