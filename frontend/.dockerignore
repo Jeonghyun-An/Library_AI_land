@@ -1,5 +1,6 @@
-node_modules
-.output
+node_modules/
+.output/
 .git
+.git/
 .gitignore
 .DS_Store
