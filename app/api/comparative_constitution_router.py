@@ -706,11 +706,161 @@ async def _index_constitution_background(
 
 # ==================== 삭제 엔드포인트 ====================
 
+@router.delete("/delete/country/{country_code}",
+    summary="특정 국가의 모든 헌법 문서 삭제"
+)
+async def delete_country_constitutions(country_code: str):
+    """
+    특정 국가의 모든 헌법 문서 일괄 삭제
+    
+    방법: query()로 ID 수집 → delete(id in [...])로 직접 삭제
+    """
+    try:
+        from app.services.country_registry import get_country, validate_country_code
+        
+        if not validate_country_code(country_code):
+            raise HTTPException(400, f"유효하지 않은 국가 코드: {country_code}")
+        
+        country_info = get_country(country_code)
+        
+        print(f"[CONSTITUTION-DELETE] Starting deletion for country: {country_code}")
+        
+        deleted_summary = {
+            "milvus_chunks": 0,
+            "minio_pdfs": 0,
+            "minio_metadata": 0
+        }
+        
+        # 1. Milvus에서 삭제 - ID 리스트 방식
+        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+        collection = get_collection(collection_name, dim=1024)
+        
+        try:
+            expr_query = f'metadata["country"] == "{country_code}"'
+            print(f"[CONSTITUTION-DELETE] Query expression: {expr_query}")
+            
+            all_chunks = collection.query(
+                expr=expr_query,
+                output_fields=["id"],
+                limit=10000
+            )
+            
+            print(f"[CONSTITUTION-DELETE] Found {len(all_chunks)} chunks")
+            
+            if len(all_chunks) > 0:
+                chunk_ids = [chunk["id"] for chunk in all_chunks]
+                
+                print(f"[CONSTITUTION-DELETE] Chunk IDs: {chunk_ids[:5]}... (first 5)")
+                
+                id_list_str = ", ".join([str(id) for id in chunk_ids])
+                expr_delete = f"id in [{id_list_str}]"
+                
+                print(f"[CONSTITUTION-DELETE] Deleting {len(chunk_ids)} chunks by ID list...")
+                
+                collection.delete(expr_delete)
+                collection.flush()
+                
+                deleted_summary["milvus_chunks"] = len(chunk_ids)
+                print(f"[CONSTITUTION-DELETE] Deleted {len(chunk_ids)} chunks")
+                
+                # Compaction
+                print(f"[CONSTITUTION-DELETE] Starting compaction...")
+                collection.compact()
+                
+                # Compaction 완료 대기
+                import time
+                max_wait = 30
+                elapsed = 0
+                
+                while elapsed < max_wait:
+                    try:
+                        state = collection.get_compaction_state()
+                        state_str = str(state).lower()
+                        
+                        if 'completed' in state_str:
+                            print(f"[CONSTITUTION-DELETE] Compaction completed at {elapsed}s")
+                            break
+                    except:
+                        pass
+                    
+                    time.sleep(1)
+                    elapsed += 1
+                
+                # 추가 대기
+                time.sleep(2)
+                
+                # 삭제 검증
+                verify_result = collection.query(
+                    expr=expr_query,
+                    output_fields=["id"],
+                    limit=10
+                )
+                
+                if len(verify_result) > 0:
+                    print(f"[CONSTITUTION-DELETE] WARNING: {len(verify_result)} chunks still exist!")
+                else:
+                    print(f"[CONSTITUTION-DELETE] Verified: All chunks deleted")
+            
+            else:
+                print(f"[CONSTITUTION-DELETE] No chunks found in Milvus")
+        
+        except Exception as e:
+            print(f"[CONSTITUTION-DELETE] Milvus deletion error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # 2. MinIO 삭제
+        minio_client = get_minio_client()
+        bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+        
+        prefix = f"constitutions/{country_code}/"
+        
+        try:
+            objects = minio_client.list_objects(bucket_name, prefix=prefix, recursive=True)
+            
+            for obj in objects:
+                minio_client.remove_object(bucket_name, obj.object_name)
+                
+                if obj.object_name.endswith('.pdf'):
+                    deleted_summary["minio_pdfs"] += 1
+                elif obj.object_name.endswith('.json'):
+                    deleted_summary["minio_metadata"] += 1
+                
+                print(f"[CONSTITUTION-DELETE] Deleted from MinIO: {obj.object_name}")
+        
+        except Exception as e:
+            print(f"[CONSTITUTION-DELETE] MinIO deletion error: {e}")
+        
+        print(f"[CONSTITUTION-DELETE] Deletion completed for: {country_code}")
+        
+        return {
+            "success": True,
+            "country_code": country_code,
+            "country_name": country_info.name_ko,
+            "deleted_items": deleted_summary,
+            "message": f"{country_info.name_ko}의 모든 헌법 문서가 삭제되었습니다."
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[CONSTITUTION-DELETE] Bulk deletion failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"일괄 삭제 실패: {e}")
+
+
+# ==================== 단일 문서 삭제 ====================
+
 @router.delete("/delete/{doc_id}",
-    summary="헌법 문서 삭제"
+    summary="헌법 문서 삭제 (doc_id 지정)"
 )
 async def delete_constitution(doc_id: str):
-    """헌법 문서 완전 삭제 (compaction 포함)"""
+    """
+    헌법 문서 완전 삭제
+    
+    주의: doc_id는 seq 없는 버전 (예: AE_20260129_493573ce)
+    """
     try:
         print(f"[CONSTITUTION-DELETE] Starting deletion for: {doc_id}")
         
@@ -720,44 +870,44 @@ async def delete_constitution(doc_id: str):
             "minio_metadata": None
         }
         
-        # 1. Milvus에서 삭제
+        # 1. Milvus에서 삭제 - ID 리스트 방식
+        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+        collection = get_collection(collection_name, dim=1024)
+        
         try:
-            collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
-            collection = get_collection(collection_name, dim=1024)
+            expr_query = f'metadata["doc_id"] == "{doc_id}"'
+            print(f"[CONSTITUTION-DELETE] Query expression: {expr_query}")
             
-            # JSON 타입 metadata 쿼리
-            expr = f'metadata["doc_id"] == "{doc_id}"'
-            
-            # 청크 수 확인
-            search_result = collection.query(
-                expr=expr,
+            all_chunks = collection.query(
+                expr=expr_query,
                 output_fields=["id"],
-                limit=1000
+                limit=10000
             )
             
-            chunk_count = len(search_result)
+            print(f"[CONSTITUTION-DELETE] Found {len(all_chunks)} chunks")
             
-            if chunk_count > 0:
-                # 삭제 실행
-                collection.delete(expr)
+            if len(all_chunks) > 0:
+                chunk_ids = [chunk["id"] for chunk in all_chunks]
+                id_list_str = ", ".join([str(id) for id in chunk_ids])
+                expr_delete = f"id in [{id_list_str}]"
+                
+                collection.delete(expr_delete)
                 collection.flush()
                 
-                print(f"[CONSTITUTION-DELETE] Running compaction...")
+                deleted_items["milvus_chunks"] = len(chunk_ids)
+                
+                # Compaction
                 collection.compact()
                 
-                # Compaction 완료 대기 (선택사항)
                 import time
-                time.sleep(1)  # 1초 대기
+                time.sleep(3)
                 
-                deleted_items["milvus_chunks"] = chunk_count
-                print(f"[CONSTITUTION-DELETE] Deleted {chunk_count} chunks from Milvus")
-        
+                print(f"[CONSTITUTION-DELETE] Deleted {len(chunk_ids)} chunks")
+            
         except Exception as e:
-            print(f"[CONSTITUTION-DELETE] Milvus deletion error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[CONSTITUTION-DELETE] Milvus error: {e}")
         
-        # 2-4. MinIO 삭제 (기존 코드 동일)
+        # 2-4. MinIO 삭제
         minio_client = get_minio_client()
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
@@ -778,265 +928,77 @@ async def delete_constitution(doc_id: str):
             try:
                 minio_client.remove_object(bucket_name, pdf_key)
                 deleted_items["minio_pdf"] = pdf_key
-            except Exception as e:
-                print(f"[CONSTITUTION-DELETE] PDF deletion error: {e}")
+            except:
+                pass
         
         try:
             minio_client.remove_object(bucket_name, metadata_key)
             deleted_items["minio_metadata"] = metadata_key
-        except Exception as e:
-            print(f"[CONSTITUTION-DELETE] Metadata deletion error: {e}")
+        except:
+            pass
         
-        if deleted_items["milvus_chunks"] == 0 and not deleted_items["minio_pdf"] and not deleted_items["minio_metadata"]:
+        if deleted_items["milvus_chunks"] == 0 and not deleted_items["minio_pdf"]:
             raise HTTPException(404, f"문서를 찾을 수 없습니다: {doc_id}")
-        
-        print(f"[CONSTITUTION-DELETE] Deletion completed for: {doc_id}")
         
         return {
             "success": True,
             "doc_id": doc_id,
             "deleted_items": deleted_items,
-            "message": "헌법 문서가 완전히 삭제되었습니다."
+            "message": "헌법 문서가 삭제되었습니다."
         }
     
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[CONSTITUTION-DELETE] Deletion failed: {e}")
+        print(f"[CONSTITUTION-DELETE] Error: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(500, f"삭제 실패: {e}")
 
 
-@router.delete("/delete/country/{country_code}",
-    summary="특정 국가의 모든 헌법 문서 삭제"
-)
-async def delete_country_constitutions(country_code: str):
-    """특정 국가의 모든 헌법 문서 일괄 삭제 (compaction 포함)"""
-    try:
-        from app.services.country_registry import get_country, validate_country_code
-        
-        if not validate_country_code(country_code):
-            raise HTTPException(400, f"유효하지 않은 국가 코드: {country_code}")
-        
-        country_info = get_country(country_code)
-        
-        print(f"[CONSTITUTION-DELETE] Starting bulk deletion for country: {country_code}")
-        
-        deleted_summary = {
-            "milvus_chunks": 0,
-            "minio_pdfs": 0,
-            "minio_metadata": 0
-        }
-        
-        deleted_doc_ids = []
-        
-        # 1. Milvus에서 삭제
-        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
-        collection = get_collection(collection_name, dim=1024)
-        
-        # JSON 타입 metadata 쿼리
-        try:
-            expr = f'metadata["country"] == "{country_code}" && metadata["doc_type"] == "constitution"'
-            print(f"[CONSTITUTION-DELETE] Query expression: {expr}")
-            
-            search_result = collection.query(
-                expr=expr,
-                output_fields=["doc_id", "metadata"],
-                limit=10000
-            )
-            
-            print(f"[CONSTITUTION-DELETE] Found {len(search_result)} chunks")
-            
-        except Exception as e:
-            print(f"[CONSTITUTION-DELETE] JSON query failed: {e}, trying fallback")
-            
-            # Fallback: doc_id 패턴
-            expr = f'doc_id like "{country_code}_%"'
-            search_result = collection.query(
-                expr=expr,
-                output_fields=["doc_id", "metadata"],
-                limit=10000
-            )
-        
-        # doc_id 추출
-        doc_ids = set()
-        for item in search_result:
-            doc_id = item.get("doc_id")
-            if doc_id:
-                doc_ids.add(doc_id)
-        
-        print(f"[CONSTITUTION-DELETE] Unique doc_ids: {len(doc_ids)}")
-        
-        # 각 doc_id 삭제
-        for doc_id in doc_ids:
-            try:
-                expr_delete = f'doc_id == "{doc_id}"'
-                
-                count_result = collection.query(
-                    expr=expr_delete,
-                    output_fields=["id"],
-                    limit=10000
-                )
-                chunk_count = len(count_result)
-                
-                if chunk_count > 0:
-                    collection.delete(expr_delete)
-                    deleted_summary["milvus_chunks"] += chunk_count
-                    deleted_doc_ids.append(doc_id)
-                    
-                    print(f"[CONSTITUTION-DELETE] Marked {chunk_count} chunks for deletion: {doc_id}")
-                
-            except Exception as e:
-                print(f"[CONSTITUTION-DELETE] Error deleting {doc_id}: {e}")
-        
-        collection.flush()
-        print(f"[CONSTITUTION-DELETE] Flushed deletions")
-        
-        try:
-            print(f"[CONSTITUTION-DELETE] Running compaction...")
-            collection.compact()
-            print(f"[CONSTITUTION-DELETE] Compaction started")
-            
-            # Compaction 완료 대기 (비동기로 실행됨)
-            import time
-            time.sleep(2)  # 2초 대기
-            
-        except Exception as e:
-            print(f"[CONSTITUTION-DELETE] Compaction error (non-fatal): {e}")
-        
-        # 2. MinIO 삭제
-        minio_client = get_minio_client()
-        bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
-        
-        prefix = f"constitutions/{country_code}/"
-        
-        try:
-            objects = minio_client.list_objects(bucket_name, prefix=prefix, recursive=True)
-            
-            for obj in objects:
-                minio_client.remove_object(bucket_name, obj.object_name)
-                
-                if obj.object_name.endswith('.pdf'):
-                    deleted_summary["minio_pdfs"] += 1
-                elif obj.object_name.endswith('.json'):
-                    deleted_summary["minio_metadata"] += 1
-                
-                print(f"[CONSTITUTION-DELETE] Deleted: {obj.object_name}")
-        
-        except Exception as e:
-            print(f"[CONSTITUTION-DELETE] MinIO deletion error: {e}")
-        
-        print(f"[CONSTITUTION-DELETE] Bulk deletion completed for: {country_code}")
-        
-        return {
-            "success": True,
-            "country_code": country_code,
-            "country_name": country_info.name_ko,
-            "deleted_documents": len(deleted_doc_ids),
-            "deleted_doc_ids": list(deleted_doc_ids),
-            "deleted_items": deleted_summary,
-            "message": f"{country_info.name_ko}의 모든 헌법 문서({len(deleted_doc_ids)}개)가 삭제되었습니다. Compaction이 백그라운드에서 실행 중입니다."
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[CONSTITUTION-DELETE] Bulk deletion failed: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(500, f"일괄 삭제 실패: {e}")
+# ==================== 리스트 조회도 수정 ====================
 
-
-# ==================== Compaction 상태 확인 엔드포인트 ====================
-
-@router.get("/compaction/status",
-    summary="Compaction 상태 확인"
-)
-async def get_compaction_status():
-    """
-    Milvus compaction 상태 확인
-    
-    Compaction이 완료되어야 삭제된 데이터가 실제로 제거됩니다.
-    """
-    try:
-        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
-        collection = get_collection(collection_name, dim=1024)
-        
-        # Compaction 상태 조회
-        try:
-            compaction_state = collection.get_compaction_state()
-            
-            return {
-                "collection": collection_name,
-                "compaction_state": str(compaction_state),
-                "num_entities": collection.num_entities,
-                "message": "Compaction 상태를 확인했습니다."
-            }
-        except Exception as e:
-            return {
-                "collection": collection_name,
-                "compaction_state": "unknown",
-                "error": str(e),
-                "num_entities": collection.num_entities,
-                "message": "Compaction 상태를 확인할 수 없습니다."
-            }
-    
-    except Exception as e:
-        raise HTTPException(500, f"상태 확인 실패: {e}")
-
-
-@router.get("/list",
-    summary="업로드된 헌법 문서 목록 조회"
-)
+@router.get("/list")
 async def list_constitutions(
     country: Optional[str] = None,
     limit: int = 100
 ):
-    """
-    업로드된 헌법 문서 목록 조회
-    
-    metadata의 doc_id를 기준으로 그룹화
-    """
+    """업로드된 헌법 문서 목록 조회"""
     try:
         collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
         collection = get_collection(collection_name, dim=1024)
         
-        # 필터 구성
         if country:
-            expr = f'metadata["doc_type"] == "constitution" and metadata["country"] == "{country}"'
+            expr = f'metadata["country"] == "{country}" && metadata["doc_type"] == "constitution"'
         else:
             expr = 'metadata["doc_type"] == "constitution"'
         
-        # 검색
         results = collection.query(
             expr=expr,
             output_fields=["metadata"],
             limit=limit * 10
         )
         
-        # doc_id별로 그룹화
+        # metadata.doc_id로 그룹화
         documents = {}
         
         for item in results:
             meta = item.get("metadata", {})
             
-            # JSON 문자열인 경우 파싱
             if isinstance(meta, str):
                 import json
                 meta = json.loads(meta)
             
-            # metadata에서 doc_id 직접 추출
             doc_id = meta.get("doc_id")
             
             if not doc_id:
-                continue  # doc_id가 없으면 스킵
+                continue
             
             if doc_id not in documents:
                 documents[doc_id] = {
                     "doc_id": doc_id,
                     "country_code": meta.get("country", ""),
-                    "country_name": meta.get("country_name_ko", ""),
+                    "country_name": meta.get("country_name", ""),
                     "continent": meta.get("continent", ""),
                     "title": meta.get("constitution_title", ""),
                     "version": meta.get("constitution_version"),
@@ -1048,7 +1010,6 @@ async def list_constitutions(
             
             documents[doc_id]["chunk_count"] += 1
         
-        # 리스트로 변환 (최신순 정렬)
         doc_list = sorted(
             documents.values(),
             key=lambda x: x.get("indexed_at", ""),
