@@ -215,19 +215,19 @@ class ComparativeConstitutionChunker:
     
     def _split_oversized_chunks(self, chunks, max_tokens=7000, min_chars=1500):
         result: List[ConstitutionChunk] = []
-        para_pattern = self.patterns["KR"]["paragraph"]
-    
         for chunk in chunks:
-            text = chunk.korean_text or ""
-            tok = self._estimate_tokens(text)
-    
-            # 충분히 짧고/의미 있는 길이면 그대로
-            if tok <= max_tokens and len(text) >= min_chars:
+            ko = chunk.korean_text or ""
+            en = chunk.english_text or ""
+            text_for_len = ko if ko else en 
+            
+            tok = self._estimate_tokens(text_for_len)
+            if tok <= max_tokens and len(text_for_len) >= min_chars:
                 result.append(chunk)
                 continue
             
             # 항(①②③ / (1)(2) 등) 단위 split
-            parts = [p.strip() for p in para_pattern.split(text) if p and p.strip()]
+            parts = self._split_text_by_sentences(text_for_len, max_length=4000, sentence_pattern=re.compile(r'([^.!?\n]+[.!?\n]+|[^.!?\n]+$)', re.M))
+
     
             if len(parts) <= 1:
                 result.append(chunk)
