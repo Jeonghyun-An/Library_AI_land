@@ -12,11 +12,13 @@ import base64
 import hashlib
 import tempfile
 import json
+import time
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import Response, StreamingResponse
+import httpx
 from pydantic import BaseModel, Field
 import fitz  # PyMuPDF
 
@@ -34,6 +36,36 @@ router = APIRouter(prefix="/api/constitution", tags=["comparative-constitution"]
 
 # ==================== 요청/응답 모델 ====================
 
+class ConstitutionArticleResult(BaseModel):
+    """헌법 조항 검색 결과"""
+    # 기본 정보
+    country: str
+    country_name: str
+    constitution_title: str
+
+    # 계층 구조
+    display_path: str
+    structure: Dict[str, Any]
+
+    # 텍스트
+    english_text: Optional[str] = None
+    korean_text: Optional[str] = None
+    text_type: str
+    has_english: bool
+    has_korean: bool
+
+    # 검색 점수
+    score: float
+
+    # 페이지
+    page: int
+    page_english: Optional[int] = None
+    page_korean: Optional[int] = None
+
+    # 하이라이트용 bbox
+    bbox_info: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class ConstitutionUploadRequest(BaseModel):
     """헌법 업로드 메타데이터"""
     title: str = Field(..., description="헌법 제목")
@@ -43,53 +75,162 @@ class ConstitutionUploadRequest(BaseModel):
 
 
 class ComparativeSearchRequest(BaseModel):
-    """비교 검색 요청"""
-    query: str = Field(..., min_length=1, description="검색 질의")
-    korean_top_k: int = Field(3, ge=1, le=10, description="한국 헌법 결과 수")
-    foreign_top_k: int = Field(5, ge=1, le=20, description="외국 헌법 결과 수")
-    target_country: Optional[str] = Field(None, description="특정 국가 필터")
-    generate_summary: bool = Field(True, description="LLM 요약 생성")
+    query: str
+    korean_top_k: int = 3
+    foreign_per_country: int = 3   # 국가당 처음 보여줄 조항 수
+    foreign_pool_size: int = 50    # 국가별 후보 풀
+    target_country: Optional[str] = None
+    cursor_map: Optional[Dict[str, int]] = None  # {"AT": 3, "DE": 6}
+    generate_summary: bool = True
 
 
-class ConstitutionArticleResult(BaseModel):
-    """헌법 조항 검색 결과"""
-    # 기본 정보
-    country: str
-    country_name: str
-    constitution_title: str
-    
-    # 계층 구조
-    display_path: str
-    structure: Dict[str, Any]
-    
-    # 텍스트
-    english_text: Optional[str] = None
-    korean_text: Optional[str] = None
-    text_type: str
-    has_english: bool
-    has_korean: bool
-    
-    # 검색 점수
-    score: float
-    
-    # 페이지
-    page: int
-    page_english: Optional[int] = None
-    page_korean: Optional[int] = None
-    
-    # 하이라이트용 bbox
-    bbox_info: List[Dict] = []
+class CountryPagedResult(BaseModel):
+    items: List[ConstitutionArticleResult] = Field(default_factory=list)
+    next_cursor: Optional[int] = None
+
+
+class ComparativePairResult(BaseModel):
+    korean: ConstitutionArticleResult
+    foreign: Dict[str, CountryPagedResult] = Field(default_factory=dict)
 
 
 class ComparativeSearchResponse(BaseModel):
-    """비교 검색 응답"""
     query: str
-    korean_results: List[ConstitutionArticleResult]
-    foreign_results: List[ConstitutionArticleResult]
+    pairs: List[ComparativePairResult] = Field(default_factory=list)
     summary: Optional[str] = None
     search_time_ms: float
-    total_korean_found: int
-    total_foreign_found: int
+
+
+class PairSummaryCountryPack(BaseModel):
+    """
+    국가별 '현재 페이지' 조항 묶음.
+    프론트에서 현재 보고 있는 페이지 상태를 그대로 요약 생성할 때 사용."""
+    items: List[ConstitutionArticleResult] = Field(default_factory=list)
+    cursor: Optional[int] = Field(None, description="프론트에서 관리하는 페이지 인덱스(옵션)")
+    total: Optional[int] = Field(None, description="해당 국가 전체 후보 개수(옵션)")
+
+
+class ComparativeSummaryRequest(BaseModel):
+    """
+    현재 화면의 pair 상태 그대로 요약 생성
+    """
+    query: str = Field(..., min_length=1)
+    korean_item: ConstitutionArticleResult
+    foreign_by_country: Dict[str, PairSummaryCountryPack] = Field(default_factory=dict)
+
+    pair_id: Optional[str] = Field(None, description="캐시 키로 쓸 pair_id (옵션)")
+    max_tokens: int = Field(320, ge=50, le=800)
+    temperature: float = Field(0.3, ge=0.0, le=1.5)
+
+
+class ComparativeSummaryResponse(BaseModel):
+    """
+    pair 요약 응답
+    """
+    query: str
+    pair_id: Optional[str] = None
+    summary: str
+    prompt_chars: int
+    llm_time_ms: float
+
+
+# ==================== 유틸함수 ====================
+def _dedupe_articles(items: List[ConstitutionArticleResult]) -> List[ConstitutionArticleResult]:
+    best = {}
+    for r in items:
+        art = (r.structure or {}).get("article_number")
+        key = (r.country, r.display_path, art)
+        if key not in best or r.score > best[key].score:
+            best[key] = r
+    return list(best.values())
+
+
+def _group_by_country(items: List[ConstitutionArticleResult]) -> Dict[str, List[ConstitutionArticleResult]]:
+    out = {}
+    for r in items:
+        out.setdefault(r.country, []).append(r)
+    for c in out:
+        out[c].sort(key=lambda x: x.score, reverse=True)
+    return out
+
+
+def _paginate(items: List[Any], start: int, size: int):
+    sliced = items[start:start + size]
+    next_cursor = start + size if start + size < len(items) else None
+    return sliced, next_cursor
+
+# 같은 pair에 대해 요약을 반복 호출하는 UX(다음 버튼 연타 등)에서 비용 절감
+_PAIR_SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
+_PAIR_SUMMARY_CACHE_TTL_SEC = int(os.getenv("PAIR_SUMMARY_CACHE_TTL", "600"))  # 10분
+
+def _cache_get(key: str) -> Optional[str]:
+    item = _PAIR_SUMMARY_CACHE.get(key)
+    if not item:
+        return None
+    if (time.time() - item["ts"]) > _PAIR_SUMMARY_CACHE_TTL_SEC:
+        _PAIR_SUMMARY_CACHE.pop(key, None)
+        return None
+    return item["summary"]
+
+def _cache_set(key: str, summary: str):
+    _PAIR_SUMMARY_CACHE[key] = {"ts": time.time(), "summary": summary}
+    
+    # ==================== Milvus Hit helpers ====================
+
+def _hit_field(hit, field: str, default=None):
+    """
+    PyMilvus hit/entity 호환 접근:
+    - hit.entity 가 dict 인 경우
+    - hit.entity 가 Entity 객체인 경우 (속성 접근)
+    - hit 자체가 dict-like 인 경우
+    """
+    # 1) hit.entity 먼저 시도
+    ent = getattr(hit, "entity", None)
+
+    if ent is not None:
+        # dict-like
+        if isinstance(ent, dict):
+            return ent.get(field, default)
+
+        # Entity object: getattr 사용
+        if hasattr(ent, field):
+            try:
+                return getattr(ent, field)
+            except Exception:
+                pass
+
+        # 일부 구현에서 ent[field] 가능
+        try:
+            return ent[field]
+        except Exception:
+            pass
+
+    # 2) hit가 dict-like 일 수 있음
+    if isinstance(hit, dict):
+        return hit.get(field, default)
+
+    # 3) hit.get(field) 형태 지원할 수도 있음 (default 인자 불가)
+    try:
+        return hit.get(field)
+    except Exception:
+        return default
+
+
+def _ensure_meta_dict(meta):
+    if meta is None:
+        return {}
+    if isinstance(meta, str):
+        try:
+            return json.loads(meta)
+        except Exception:
+            return {}
+    if isinstance(meta, dict):
+        return meta
+    # 기타 타입은 dict로 강제 변환 시도
+    try:
+        return dict(meta)
+    except Exception:
+        return {}
 
 
 # ==================== 일괄 업로드 엔드포인트 ====================
@@ -270,10 +411,7 @@ async def batch_upload_constitutions(
         "results": results
     }
 
-
 # ==================== 업로드 엔드포인트 (기존) ====================
-
-# app/api/comparative_constitution_router.py
 
 @router.post("/upload")
 async def upload_constitution(
@@ -1215,144 +1353,18 @@ async def list_constitutions(
         raise HTTPException(500, f"목록 조회 실패: {e}")
 # ==================== 비교 검색 엔드포인트 ====================
 
-@router.post("/comparative-search", 
-    response_model=ComparativeSearchResponse,
-    summary="비교헌법 검색",
-    description="""
-    # 한국 헌법 vs 외국 헌법 비교 검색
-    
-    ## 검색 프로세스
-    1. 쿼리 임베딩 생성 (BGE-M3)
-    2. Milvus 벡터 검색
-       - 한국 헌법: country="KR"
-       - 외국 헌법: country!="KR"
-    3. LLM 비교 요약 생성 (옵션)
-    
-    ## 검색 결과
-    - **좌측**: 한국 헌법 조항들
-    - **우측**: 외국 헌법 조항들
-    - **상단**: LLM 생성 비교 요약
-    
-    ## 필터 옵션
-    - `target_country`: 특정 국가만 (예: "GH", "US")
-    - `korean_top_k`: 한국 헌법 결과 수
-    - `foreign_top_k`: 외국 헌법 결과 수
-    
-    ## 검색 예시
-    - "인간의 존엄성"
-    - "표현의 자유"
-    - "재산권 보장"
-    - "삼권분립"
-    """,
-    responses={
-        200: {
-            "description": "검색 성공",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "query": "인간의 존엄성",
-                        "korean_results": [
-                            {
-                                "country": "KR",
-                                "display_path": "제2장 > 제10조",
-                                "korean_text": "제10조 모든 국민은 인간으로서의 존엄과 가치를 가지며...",
-                                "page": 3,
-                                "score": 0.92
-                            }
-                        ],
-                        "foreign_results": [
-                            {
-                                "country": "GH",
-                                "country_name": "가나",
-                                "display_path": "Article 15",
-                                "english_text": "(1) The dignity of all persons shall be inviolable.",
-                                "korean_text": "(1) 모든 사람의 존엄성은 불가침이다.",
-                                "page": 12,
-                                "score": 0.89
-                            }
-                        ],
-                        "summary": "한국 헌법 제10조와 가나 헌법 제15조는 모두 인간의 존엄성을 기본권으로 보장...",
-                        "search_time_ms": 456.7
-                    }
-                }
-            }
-        }
-    }
-)
-async def comparative_search(request: ComparativeSearchRequest):
-    """
-    비교헌법 검색
-    - 좌측: 한국 헌법
-    - 우측: 외국 헌법
-    """
-    import time
-    
-    start_time = time.time()
-    
-    try:
-        # 1. 쿼리 임베딩
-        emb_model = get_embedding_model()
-        query_embedding = emb_model.encode([request.query], normalize_embeddings=True)[0]
-        
-        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
-        collection = get_collection(collection_name, dim=1024)
-        
-        # 2. 한국 헌법 검색
-        korean_results = await _search_korean_constitution(
-            collection,
-            query_embedding,
-            top_k=request.korean_top_k
-        )
-        
-        # 3. 외국 헌법 검색
-        foreign_results = await _search_foreign_constitutions(
-            collection,
-            query_embedding,
-            top_k=request.foreign_top_k,
-            target_country=request.target_country
-        )
-        
-        # 4. LLM 요약 (옵션)
-        summary = None
-        if request.generate_summary and (korean_results or foreign_results):
-            summary = await _generate_comparison_summary(
-                request.query,
-                korean_results,
-                foreign_results
-            )
-        
-        search_time = (time.time() - start_time) * 1000
-        
-        return ComparativeSearchResponse(
-            query=request.query,
-            korean_results=korean_results,
-            foreign_results=foreign_results,
-            summary=summary,
-            search_time_ms=search_time,
-            total_korean_found=len(korean_results),
-            total_foreign_found=len(foreign_results)
-        )
-    
-    except Exception as e:
-        print(f"[CONSTITUTION] Search error: {e}")
-        raise HTTPException(500, f"검색 실패: {e}")
-
-
 async def _search_korean_constitution(
     collection,
     query_embedding,
     top_k: int
 ) -> List[ConstitutionArticleResult]:
-    """한국 헌법 검색"""
-    
     search_params = {
         "metric_type": "IP",
         "params": {"ef": 256}
     }
-    
-    # 필터: 한국 헌법만 + 문서 타입
+
     expr = 'metadata["country"] == "KR" and metadata["doc_type"] == "constitution"'
-    
+
     search_result = collection.search(
         data=[query_embedding.tolist()],
         anns_field="embedding",
@@ -1361,153 +1373,397 @@ async def _search_korean_constitution(
         expr=expr,
         output_fields=["doc_id", "chunk_text", "metadata"]
     )
-    
+
     results = []
     for hits in search_result:
         for hit in hits:
-            meta = hit.entity.get('metadata', {})
-            
-            if isinstance(meta, str):
-                import json
-                meta = json.loads(meta)
-            
+            meta_raw = _hit_field(hit, "metadata", {})
+            meta = _ensure_meta_dict(meta_raw)
+
             result = ConstitutionArticleResult(
                 country=meta.get('country', 'KR'),
                 country_name=meta.get('country_name', '대한민국'),
                 constitution_title=meta.get('constitution_title', '대한민국헌법'),
                 display_path=meta.get('display_path', ''),
-                structure=meta.get('structure', {}),
+                structure=meta.get('structure', {}) if isinstance(meta.get('structure', {}), dict) else {},
                 english_text=meta.get('english_text'),
                 korean_text=meta.get('korean_text'),
                 text_type=meta.get('text_type', 'korean_only'),
-                has_english=meta.get('has_english', False),
-                has_korean=meta.get('has_korean', True),
-                score=float(hit.score),
-                page=meta.get('page', 1),
+                has_english=bool(meta.get('has_english', False)),
+                has_korean=bool(meta.get('has_korean', True)),
+                score=float(getattr(hit, "score", 0.0)),
+                page=int(meta.get('page', 1) or 1),
                 page_english=meta.get('page_english'),
                 page_korean=meta.get('page_korean'),
-                bbox_info=meta.get('bbox_info', [])
+                bbox_info=meta.get('bbox_info', []) if isinstance(meta.get('bbox_info', []), list) else []
             )
             results.append(result)
-    
+
     return results[:top_k]
 
 
-async def _search_foreign_constitutions(
+async def _search_foreign_candidate_pool(
     collection,
     query_embedding,
-    top_k: int,
+    pool_size: int,
     target_country: Optional[str] = None
 ) -> List[ConstitutionArticleResult]:
-    """외국 헌법 검색"""
-    
+
     search_params = {
         "metric_type": "IP",
         "params": {"ef": 256}
     }
-    
-    # 필터 구성
+
     if target_country:
         expr = f'metadata["country"] == "{target_country}" and metadata["doc_type"] == "constitution"'
     else:
         expr = 'metadata["country"] != "KR" and metadata["doc_type"] == "constitution"'
-    
-    search_result = collection.search(
+
+    raw = collection.search(
         data=[query_embedding.tolist()],
         anns_field="embedding",
         param=search_params,
-        limit=top_k * 2,
+        limit=pool_size,
         expr=expr,
-        output_fields=["doc_id", "chunk_text", "metadata"]
+        output_fields=["metadata"]
     )
-    
+
     results = []
-    for hits in search_result:
+    for hits in raw:
         for hit in hits:
-            meta = hit.entity.get('metadata', {})
-            
-            if isinstance(meta, str):
-                import json
-                meta = json.loads(meta)
-            
-            result = ConstitutionArticleResult(
-                country=meta.get('country', 'UNKNOWN'),
-                country_name=meta.get('country_name', ''),
-                constitution_title=meta.get('constitution_title', ''),
-                display_path=meta.get('display_path', ''),
-                structure=meta.get('structure', {}),
-                english_text=meta.get('english_text'),
-                korean_text=meta.get('korean_text'),
-                text_type=meta.get('text_type', 'english_only'),
-                has_english=meta.get('has_english', False),
-                has_korean=meta.get('has_korean', False),
-                score=float(hit.score),
-                page=meta.get('page', 1),
-                page_english=meta.get('page_english'),
-                page_korean=meta.get('page_korean'),
-                bbox_info=meta.get('bbox_info', [])
+            meta_raw = _hit_field(hit, "metadata", {})
+            meta = _ensure_meta_dict(meta_raw)
+
+            results.append(
+                ConstitutionArticleResult(
+                    country=meta.get("country"),
+                    country_name=meta.get("country_name"),
+                    constitution_title=meta.get("constitution_title"),
+                    display_path=meta.get("display_path"),
+                    structure=meta.get("structure", {}) if isinstance(meta.get("structure", {}), dict) else {},
+                    english_text=meta.get("english_text"),
+                    korean_text=meta.get("korean_text"),
+                    text_type=meta.get("text_type"),
+                    has_english=bool(meta.get("has_english", False)),
+                    has_korean=bool(meta.get("has_korean", False)),
+                    score=float(getattr(hit, "score", 0.0)),
+                    page=int(meta.get("page", 1) or 1),
+                    page_english=meta.get("page_english"),
+                    page_korean=meta.get("page_korean"),
+                    bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info", []), list) else []
+                )
             )
-            results.append(result)
-    
-    return results[:top_k]
 
+    return _dedupe_articles(results)
 
-async def _generate_comparison_summary(
-    query: str,
+def _build_pairs(
     korean_results: List[ConstitutionArticleResult],
-    foreign_results: List[ConstitutionArticleResult]
-) -> str:
-    """LLM으로 비교 요약 생성"""
-    
-    try:
-        vllm_url = os.getenv("VLLM_BASE_URL", "http://vllm-a4000:8000")
-        
-        import httpx
-        
-        # 한국 헌법 텍스트
-        korean_text = "\n".join([
-            f"{r.display_path}: {r.korean_text[:150]}..."
-            for r in korean_results[:2]
-        ])
-        
-        # 외국 헌법 텍스트
-        foreign_text = "\n".join([
-            f"{r.country_name} {r.display_path}: " +
-            (f"[영어] {r.english_text[:100]}... " if r.has_english else "") +
-            (f"[한글] {r.korean_text[:100]}..." if r.has_korean else "")
-            for r in foreign_results[:2]
-        ])
-        
-        prompt = f"""다음은 "{query}"에 관한 한국 헌법과 외국 헌법의 조항입니다.
+    foreign_candidates: List[ConstitutionArticleResult],
+    per_country: int,
+    cursor_map: Optional[Dict[str, int]]
+) -> List[ComparativePairResult]:
 
-# 한국 헌법
-{korean_text}
+    cursor_map = cursor_map or {}
+    by_country = _group_by_country(foreign_candidates)
 
-# 외국 헌법
-{foreign_text}
+    pairs = []
 
-위 조항들을 비교하여 2-3문장으로 요약해주세요. 공통점과 차이점을 중심으로 설명하세요."""
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{vllm_url}/v1/completions",
-                json={
-                    "model": "gemma-3-4b-it",
-                    "prompt": prompt,
-                    "max_tokens": 200,
-                    "temperature": 0.3,
-                }
+    for kr in korean_results:
+        foreign_block = {}
+
+        for country, items in by_country.items():
+            start = cursor_map.get(country, 0)
+            sliced, next_cursor = _paginate(items, start, per_country)
+
+            foreign_block[country] = CountryPagedResult(
+                items=sliced,
+                next_cursor=next_cursor
             )
-            
-            result = response.json()
-            summary = result['choices'][0]['text'].strip()
-            
-            return summary
-    
-    except Exception as e:
-        print(f"[SUMMARY] LLM 요약 실패: {e}")
-        return None
 
+        pairs.append(
+            ComparativePairResult(
+                korean=kr,
+                foreign=foreign_block
+            )
+        )
+
+    return pairs
+@router.post(
+    "/comparative-search",
+    response_model=ComparativeSearchResponse
+)
+async def comparative_search(request: ComparativeSearchRequest):
+    import time
+    start = time.time()
+
+    emb_model = get_embedding_model()
+    query_embedding = emb_model.encode([request.query], normalize_embeddings=True)[0]
+
+    collection = get_collection(
+        os.getenv("MILVUS_COLLECTION", "library_books"),
+        dim=1024
+    )
+
+    # 한국 헌법 (anchor)
+    korean_results = await _search_korean_constitution(
+        collection,
+        query_embedding,
+        top_k=request.korean_top_k
+    )
+    korean_results = _dedupe_articles(korean_results)
+
+    # 외국 헌법 후보 풀
+    foreign_candidates = await _search_foreign_candidate_pool(
+        collection,
+        query_embedding,
+        pool_size=request.foreign_pool_size,
+        target_country=request.target_country
+    )
+
+    # Pair 생성 (국가별 페이징)
+    pairs = _build_pairs(
+        korean_results=korean_results,
+        foreign_candidates=foreign_candidates,
+        per_country=request.foreign_per_country,
+        cursor_map=request.cursor_map
+    )
+
+    # 요약 (선택)
+    summary = None
+    if request.generate_summary and pairs:
+        summary = f"'{request.query}'에 대해 한국 헌법 조항과 외국 헌법 조항들을 국가별로 비교 제공합니다."
+
+    return ComparativeSearchResponse(
+        query=request.query,
+        pairs=pairs,
+        summary=summary,
+        search_time_ms=(time.time() - start) * 1000
+    )
+
+def build_pair_summary_prompt(
+    query: str,
+    korean_item: ConstitutionArticleResult,
+    foreign_by_country: Dict[str, PairSummaryCountryPack],
+) -> str:
+    """
+    '현재 화면' pair 상태(한국 1개 + 외국 국가별 현재 조항들)로만 비교 요약하도록 만드는 프롬프트.
+    - 절대 다른 조항/외부지식 끌어오지 않게 강하게 제한
+    - 결과는 3~5문장 권장 (UI 상단 요약)
+    """
+
+    def _clean_text(s: Optional[str], limit: int = 1200) -> str:
+        if not s:
+            return ""
+        s = s.strip()
+        if len(s) <= limit:
+            return s
+        return s[:limit] + "\n...[truncated]"
+
+    # 한국 anchor
+    kr_path = korean_item.display_path or "한국 헌법"
+    kr_article = ""
+    st = korean_item.structure or {}
+    if isinstance(st, dict) and st.get("article_number"):
+        kr_article = f"(Article {st.get('article_number')})"
+
+    kr_text = _clean_text(korean_item.korean_text or korean_item.english_text or "")
+
+    # 외국: 국가별 1개(또는 items[0])만 사용
+    foreign_blocks: List[str] = []
+    for country_code, pack in (foreign_by_country or {}).items():
+        if not pack or not pack.items:
+            continue
+
+        item = pack.items[0]  # "현재 페이지" 1개만 비교
+        f_country = item.country_name or country_code
+        f_path = item.display_path or ""
+        f_struct = item.structure if isinstance(item.structure, dict) else {}
+        f_article = f_struct.get("article_number")
+        f_article_str = f"(Article {f_article})" if f_article else ""
+
+        f_en = _clean_text(item.english_text or "", limit=900)
+        f_ko = _clean_text(item.korean_text or "", limit=900)
+
+        # bilingual/mono 모두 커버
+        if f_en and f_ko:
+            f_text = f"[EN]\n{f_en}\n\n[KO]\n{f_ko}"
+        elif f_ko:
+            f_text = f"[KO]\n{f_ko}"
+        else:
+            f_text = f"[EN]\n{f_en}"
+
+        foreign_blocks.append(
+            f"## {f_country} {f_article_str} {f_path}\n{f_text}".strip()
+        )
+
+    foreign_section = "\n\n".join(foreign_blocks) if foreign_blocks else "(외국 헌법 조항이 제공되지 않았습니다.)"
+
+    # 핵심: "현재 제공된 텍스트만" 사용, 조문번호/경로를 반드시 명시
+    prompt = f"""
+당신은 "비교헌법 요약"을 생성하는 법률 비교 어시스턴트입니다.
+
+[목표]
+- 사용자가 입력한 쿼리 "{query}" 관점에서,
+- 아래에 제공된 '한국 헌법 1개 조항'과 '외국 헌법(국가별 현재 조항)'을 비교하여
+- UI 상단에 표시할 짧고 정확한 비교 요약을 작성하세요.
+
+[절대 규칙]
+1) 외부 지식/추측 금지. 아래 제공된 텍스트 밖의 내용은 말하지 마세요.
+2) 현재 제공된 조항들만 비교하세요. 다른 조항을 끌어오지 마세요.
+3) 반드시 "한국: {kr_path} {kr_article}" 와
+   외국은 국가별로 "{country} + 조항/경로" 를 명시해서 비교하세요.
+4) 결과는 3~5문장. 각 문장은 정보 밀도가 높게.
+5) 공통점(1~2문장) + 차이점(1~2문장) + 주의/요약(선택 1문장) 구조 권장.
+6) 법률 용어는 중립적으로, 과장/평가/정치적 판단 금지.
+
+# 한국 헌법 (Anchor)
+- 경로: {kr_path} {kr_article}
+- 텍스트:
+{kr_text}
+
+# 외국 헌법 (국가별 현재 조항)
+{foreign_section}
+
+[출력 형식]
+- 한국 조항과 각 국가 조항을 비교하는 '단락 1개'로만 작성.
+- 불릿/번호 없이 문장으로만 작성.
+""".strip()
+
+    return prompt
+
+
+# -------------------- LLM Call Helper --------------------
+
+async def _call_vllm_completion(prompt: str, max_tokens: int, temperature: float) -> str:
+    vllm_url = os.getenv("VLLM_BASE_URL", "http://vllm-a4000:8000")
+    model_name = os.getenv("VLLM_MODEL_FOR_SUMMARY", "gemma-3-4b-it")
+
+    async with httpx.AsyncClient(timeout=40.0) as client:
+        resp = await client.post(
+            f"{vllm_url}/v1/completions",
+            json={
+                "model": model_name,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+
+    if resp.status_code >= 400:
+        raise HTTPException(resp.status_code, f"LLM 호출 실패: {resp.text}")
+
+    data = resp.json()
+    try:
+        text = data["choices"][0]["text"]
+    except Exception:
+        raise HTTPException(500, f"LLM 응답 파싱 실패: {data}")
+
+    return (text or "").strip()
+
+
+def _make_pair_cache_key(req: ComparativeSummaryRequest) -> str:
+    """
+    pair_id가 있으면 우선 사용, 없으면 payload 기반으로 해시 생성
+    """
+    if req.pair_id:
+        return f"pair:{req.pair_id}"
+
+    # 안정적 해시: 요약에 영향을 주는 핵심 필드만 포함
+    payload = {
+        "q": req.query,
+        "kr": {
+            "country": req.korean_item.country,
+            "display_path": req.korean_item.display_path,
+            "page": req.korean_item.page,
+            "korean_text": (req.korean_item.korean_text or "")[:500],
+            "english_text": (req.korean_item.english_text or "")[:500],
+            "structure": req.korean_item.structure or {},
+        },
+        "fx": {
+            c: {
+                "display_path": (pack.items[0].display_path if pack.items else ""),
+                "page": (pack.items[0].page if pack.items else None),
+                "korean_text": ((pack.items[0].korean_text or "")[:500] if pack.items else ""),
+                "english_text": ((pack.items[0].english_text or "")[:500] if pack.items else ""),
+                "structure": (pack.items[0].structure or {} if pack.items else {}),
+            }
+            for c, pack in (req.foreign_by_country or {}).items()
+            if pack and pack.items
+        },
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    h = hashlib.sha256(raw).hexdigest()[:16]
+    return f"pairhash:{h}"
+
+
+# -------------------- Route: /comparative-summary --------------------
+
+@router.post(
+    "/comparative-summary",
+    response_model=ComparativeSummaryResponse,
+    summary="현재 pair(한국 1개 + 외국 국가별 현재 조항) 기반 비교 요약 생성",
+)
+async def comparative_summary(req: ComparativeSummaryRequest):
+    """
+    프론트에서 '현재 화면에 보이는 pair 상태'를 그대로 보내면,
+    해당 pair만 기반으로 LLM 비교 요약을 반환한다.
+
+    사용 시점:
+    - 최초 검색 결과 로딩 직후
+    - 특정 국가에서 '다음 조항' 버튼 눌러 해당 국가 현재 조항이 바뀐 직후
+    - 한국 anchor가 바뀐 직후
+    """
+
+    try:
+        # 기본 검증
+        if not req.korean_item:
+            raise HTTPException(400, "korean_item 이 필요합니다.")
+        if not req.foreign_by_country:
+            raise HTTPException(400, "foreign_by_country 가 비어있습니다. (최소 1개 국가는 필요)")
+
+        cache_key = _make_pair_cache_key(req)
+        cached = _cache_get(cache_key)
+        if cached:
+            return ComparativeSummaryResponse(
+                query=req.query,
+                pair_id=req.pair_id,
+                summary=cached,
+                prompt_chars=0,
+                llm_time_ms=0.0,
+            )
+
+        prompt = build_pair_summary_prompt(
+            query=req.query,
+            korean_item=req.korean_item,
+            foreign_by_country=req.foreign_by_country,
+        )
+
+        t0 = time.time()
+        summary = await _call_vllm_completion(
+            prompt=prompt,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+        )
+        t_ms = (time.time() - t0) * 1000.0
+
+        if not summary:
+            raise HTTPException(500, "LLM이 빈 요약을 반환했습니다.")
+
+        _cache_set(cache_key, summary)
+
+        return ComparativeSummaryResponse(
+            query=req.query,
+            pair_id=req.pair_id,
+            summary=summary,
+            prompt_chars=len(prompt),
+            llm_time_ms=t_ms,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[PAIR-SUMMARY] Error: {e}")
+        raise HTTPException(500, f"pair 요약 생성 실패: {e}")
 
 # ==================== PDF 페이지 이미지 엔드포인트 ====================
 
