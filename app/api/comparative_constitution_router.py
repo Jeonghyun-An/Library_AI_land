@@ -320,39 +320,21 @@ async def upload_constitution(
                 
                 existing = collection.query(
                     expr=expr,
-                    output_fields=["doc_id"],
+                    output_fields=["id"],
                     limit=1000
                 )
                 
-                if existing:
-                    existing_doc_ids = set(item.get("doc_id") for item in existing if item.get("doc_id"))
-                    
-                    print(f"[CONSTITUTION] 기존 문서 발견: {len(existing_doc_ids)}개")
-                    
-                    # 기존 문서 삭제
-                    for doc_id in existing_doc_ids:
-                        try:
-                            expr_delete = f'doc_id == "{doc_id}"'
-                            collection.delete(expr_delete)
-                            print(f"[CONSTITUTION] 기존 문서 삭제: {doc_id}")
-                        except Exception as e:
-                            print(f"[CONSTITUTION] 삭제 오류 (무시): {e}")
-                    
-                    # Flush
-                    collection.flush()
-                    print(f"[CONSTITUTION] 기존 문서 삭제 완료 (flush)")
-                    
-                    try:
-                        collection.compact()
-                        print(f"[CONSTITUTION] Compaction 시작")
-                    except Exception as e:
-                        print(f"[CONSTITUTION] Compaction 오류 (무시): {e}")
-                
-            except Exception as e:
-                print(f"[CONSTITUTION] 기존 문서 확인 오류: {e}")
-                if not replace_existing:
-                    raise HTTPException(500, f"기존 문서 확인 실패: {e}")
-        
+        if existing:
+            ids = [x["id"] for x in existing if "id" in x]
+            if ids:
+                id_list_str = ", ".join(map(str, ids))
+                collection.delete(f"id in [{id_list_str}]")  # ✅ pk delete
+                collection.flush()
+                try:
+                    collection.compact()
+                except:
+                    pass
+
         # 4. 제목 자동 생성
         if not title:
             title = f"{country_info.name_ko} 헌법"
@@ -567,21 +549,37 @@ async def _index_constitution_background(
     is_bilingual: bool,
     minio_key: str
 ):
-    """헌법 인덱싱 백그라운드 작업"""
+    """
+    헌법 인덱싱 백그라운드 작업
+    
+    개선사항:
+    - 빈 청크 체크 추가
+    - 에러 로깅 강화
+    """
     import traceback
-    from app.services.country_registry import get_country_metadata
+    from datetime import datetime
     
     try:
         print(f"[CONSTITUTION] Indexing started: {doc_id}")
+        print(f"[CONSTITUTION] Country: {country}, Title: {title}, Version: {version}")
         
-        # 1. 파일 존재 확인
-        if not os.path.exists(pdf_path):
-            raise FileNotFoundError(f"임시 파일이 존재하지 않습니다: {pdf_path}")
+        # 국가 정보 조회
+        from app.services.country_registry import get_country
+        country_info = get_country(country)
         
-        # 국가 메타데이터 가져오기
-        country_meta = get_country_metadata(country)
+        country_meta = {
+            "country": country,
+            "country_code": country,
+            "country_name": country_info.name_ko,
+            "country_name_ko": country_info.name_ko,
+            "country_name_en": country_info.name_en,
+            "continent": country_info.continent,
+            "region": country_info.region,
+        }
         
-        # 2. 청킹 (bbox 포함)
+        # 1. 청킹 (bbox 포함)
+        print(f"[CONSTITUTION] Step 1: Chunking PDF...")
+        
         chunks = chunk_constitution_document(
             pdf_path=pdf_path,
             doc_id=doc_id,
@@ -593,7 +591,44 @@ async def _index_constitution_background(
         
         print(f"[CONSTITUTION] Generated {len(chunks)} chunks")
         
-        # 3. 임베딩 생성
+        if not chunks or len(chunks) == 0:
+            error_msg = f"청킹 실패: 0개의 청크가 생성되었습니다."
+            print(f"[CONSTITUTION] ERROR: {error_msg}")
+            
+            # MinIO 메타데이터에 에러 기록
+            minio_client = get_minio_client()
+            bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+            
+            error_metadata = {
+                "doc_id": doc_id,
+                "status": "failed",
+                "error": error_msg,
+                "indexed_at": datetime.utcnow().isoformat(),
+                **country_meta,
+                "minio_key": minio_key,
+                "title": title,
+                "version": version
+            }
+            
+            metadata_key = f"constitutions/{country}/metadata/{doc_id}.json"
+            
+            import json
+            from io import BytesIO
+            
+            minio_client.put_object(
+                bucket_name,
+                metadata_key,
+                BytesIO(json.dumps(error_metadata, ensure_ascii=False, indent=2).encode('utf-8')),
+                len(json.dumps(error_metadata, ensure_ascii=False, indent=2).encode('utf-8')),
+                content_type='application/json'
+            )
+            
+            print(f"[CONSTITUTION] Error metadata saved to: {metadata_key}")
+            return
+        
+        # 2. 임베딩 생성
+        print(f"[CONSTITUTION] Step 2: Generating embeddings...")
+        
         emb_model = get_embedding_model()
         
         search_texts = [chunk.search_text for chunk in chunks]
@@ -606,16 +641,24 @@ async def _index_constitution_background(
         
         print(f"[CONSTITUTION] Generated embeddings: {embeddings.shape}")
         
-        # 4. Milvus 저장
+        if len(embeddings) != len(chunks):
+            error_msg = f"임베딩 크기 불일치: chunks={len(chunks)}, embeddings={len(embeddings)}"
+            print(f"[CONSTITUTION] ERROR: {error_msg}")
+            return
+        
+        # 3. Milvus 저장 (배치 삽입으로 수정)
+        print(f"[CONSTITUTION] Step 3: Saving to Milvus...")
+        
         collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
         collection = get_collection(collection_name, dim=1024)
         
-        # 엔티티 구성
+        # 엔티티 구성 (기존과 동일)
         ids = [f"{doc_id}_{i}" for i in range(len(chunks))]
         chunk_texts = [chunk.korean_text or chunk.english_text or "" for chunk in chunks]
+        embeddings_list = embeddings.tolist()
         metadatas = [chunk.to_dict() for chunk in chunks]
         
-        # 메타데이터 강화
+        # 메타데이터 강화 (기존과 동일)
         for meta in metadatas:
             meta["minio_key"] = minio_key
             meta["minio_bucket"] = os.getenv("MINIO_BUCKET", "library-bucket")
@@ -627,35 +670,73 @@ async def _index_constitution_background(
             meta["indexed_at"] = datetime.utcnow().isoformat()
             meta["updated_at"] = datetime.utcnow().isoformat()
         
-        entities = [
-            ids,
-            chunk_texts,
-            embeddings.tolist(),
-            metadatas,
-        ]
+        # bbox_info 너무 크면 줄이기 (추가 안전장치)
+        for meta in metadatas:
+            if "bbox_info" in meta and isinstance(meta["bbox_info"], list):
+                meta["bbox_info"] = meta["bbox_info"][:5]  # 최대 5개만
         
-        collection.insert(entities)
-        collection.flush()
+        print(f"[CONSTITUTION] Total chunks to insert: {len(chunks)}")
         
-        print(f"[CONSTITUTION] Inserted {len(chunks)} chunks into Milvus")
+        # 배치 삽입 설정
+        BATCH_SIZE = 300  # AR.PDF(21p): 80~100, AE.PDF(63p): 40~60 추천. 여기서 조정하세요!
         
-        # 5. MinIO 메타데이터 저장
+        inserted_count = 0
+        failed_batches = []
+        
+        for start_idx in range(0, len(chunks), BATCH_SIZE):
+            end_idx = min(start_idx + BATCH_SIZE, len(chunks))
+            
+            batch_ids = ids[start_idx:end_idx]
+            batch_texts = chunk_texts[start_idx:end_idx]
+            batch_embeddings = embeddings_list[start_idx:end_idx]
+            batch_meta = metadatas[start_idx:end_idx]
+            
+            batch_entities = [
+                batch_ids,
+                batch_texts,
+                batch_embeddings,
+                batch_meta,
+            ]
+            
+            print(f"[Milvus] Inserting batch {start_idx // BATCH_SIZE + 1}: "
+                  f"{len(batch_ids)} chunks (index {start_idx}~{end_idx-1})")
+            
+            try:
+                insert_result = collection.insert(batch_entities)
+                collection.flush()  # 배치별 flush (안정성 ↑)
+                inserted_count += len(batch_ids)
+                print(f"[Milvus] Success: {len(batch_ids)} chunks inserted (ids: {insert_result.primary_keys[:3]}...)")
+            except Exception as batch_error:
+                print(f"[Milvus] Batch insert FAILED at {start_idx}: {batch_error}")
+                failed_batches.append({
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "error": str(batch_error)
+                })
+                # 실패해도 계속 진행 (부분 성공 허용)
+        
+        print(f"[CONSTITUTION] Milvus insert completed: {inserted_count}/{len(chunks)} chunks inserted")
+        
+        if failed_batches:
+            print(f"[CONSTITUTION] Warning: {len(failed_batches)} batches failed. Check logs.")
+            # 필요 시 실패 배치 재시도 로직 추가 가능
+        
+        # 4. MinIO 메타데이터 저장
+        print(f"[CONSTITUTION] Step 4: Saving metadata to MinIO...")
+        
         minio_client = get_minio_client()
         bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
         
         chunk_summary = []
-        for i, chunk in enumerate(chunks):
+        for i, chunk in enumerate(chunks[:10]):  # 처음 10개만
             chunk_summary.append({
                 "seq": i,
-                "article_number": chunk.structure.get("article_number"),
-                "chapter_number": chunk.structure.get("chapter_number"),
+                "article": chunk.structure.get("article_number"),
                 "display_path": chunk.display_path,
-                "page": chunk.page,
-                "has_english": chunk.has_english,
-                "has_korean": chunk.has_korean,
+                "text_preview": chunk.search_text[:100]
             })
         
-        detailed_metadata = {
+        metadata_json = {
             "doc_id": doc_id,
             "doc_type": "constitution",
             **country_meta,
@@ -664,39 +745,67 @@ async def _index_constitution_background(
             "is_bilingual": is_bilingual,
             "minio_key": minio_key,
             "minio_bucket": bucket_name,
-            "file_size_bytes": os.path.getsize(pdf_path),
-            "mime_type": "application/pdf",
             "chunk_count": len(chunks),
             "chunk_strategy": "article_level",
-            "embedding_model": os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3"),
             "chunk_summary": chunk_summary,
-            "total_articles": len(set(c.structure.get("article_number") for c in chunks if c.structure.get("article_number"))),
-            "total_chapters": len(set(c.structure.get("chapter_number") for c in chunks if c.structure.get("chapter_number"))),
             "indexed_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
             "status": "completed"
         }
         
-        metadata_json = json.dumps(detailed_metadata, ensure_ascii=False, indent=2)
         metadata_key = f"constitutions/{country}/metadata/{doc_id}.json"
+        
+        import json
+        from io import BytesIO
+        
+        metadata_bytes = json.dumps(metadata_json, ensure_ascii=False, indent=2).encode('utf-8')
         
         minio_client.put_object(
             bucket_name,
             metadata_key,
-            io.BytesIO(metadata_json.encode('utf-8')),
-            len(metadata_json.encode('utf-8')),
+            BytesIO(metadata_bytes),
+            len(metadata_bytes),
             content_type='application/json'
         )
         
-        print(f"[CONSTITUTION] Metadata saved to MinIO: {metadata_key}")
-        print(f"[CONSTITUTION] Indexing completed: {doc_id}")
+        print(f"[CONSTITUTION] Metadata saved to: {metadata_key}")
+        print(f"[CONSTITUTION] Indexing completed successfully: {doc_id}")
     
     except Exception as e:
-        print(f"[CONSTITUTION] Indexing failed: {e}")
+        print(f"[CONSTITUTION] Indexing failed for {doc_id}: {e}")
         traceback.print_exc()
-        raise
+        
+        # 에러 발생 시에도 메타데이터 저장
+        try:
+            minio_client = get_minio_client()
+            bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+            
+            error_metadata = {
+                "doc_id": doc_id,
+                "status": "failed",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "indexed_at": datetime.utcnow().isoformat()
+            }
+            
+            metadata_key = f"constitutions/{country}/metadata/{doc_id}_error.json"
+            
+            import json
+            from io import BytesIO
+            
+            minio_client.put_object(
+                bucket_name,
+                metadata_key,
+                BytesIO(json.dumps(error_metadata, ensure_ascii=False, indent=2).encode('utf-8')),
+                len(json.dumps(error_metadata, ensure_ascii=False, indent=2).encode('utf-8')),
+                content_type='application/json'
+            )
+            
+            print(f"[CONSTITUTION] Error metadata saved to: {metadata_key}")
+        except:
+            pass
     
     finally:
+        # 임시 파일 정리
         if os.path.exists(pdf_path):
             try:
                 os.unlink(pdf_path)
@@ -1630,6 +1739,83 @@ async def get_pdf_page_image(
 
 
 # ==================== 통계 엔드포인트 ====================
+@router.get("/debug/milvus/info",
+    tags=["debug"],
+    summary="Milvus 컬렉션 정보"
+)
+def debug_milvus_info():
+    """Milvus 컬렉션 기본 정보 조회"""
+    try:
+        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+        collection = get_collection(collection_name, dim=1024)
+        
+        return {
+            "collection": collection_name,
+            "exists": True,
+            "num_entities": collection.num_entities,
+            "indexes": [str(idx) for idx in collection.indexes],
+            "schema_fields": [f.name for f in collection.schema.fields],
+        }
+        
+    except Exception as e:
+        raise HTTPException(500, f"Milvus info 조회 실패: {e}")
+
+
+@router.get("/debug/milvus/peek",
+    tags=["debug"],
+    summary="Milvus 데이터 미리보기"
+)
+def debug_milvus_peek(limit: int = 100):
+    """
+    Milvus 컬렉션 데이터 미리보기 (전체 텍스트)
+    
+    Parameters:
+    - limit: 조회할 개수 (기본값: 100)
+    """
+    try:
+        collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
+        collection = get_collection(collection_name, dim=1024)
+        
+        # 전체 데이터 조회
+        results = collection.query(
+            expr="id >= 0",
+            output_fields=["id", "doc_id", "chunk_text", "metadata"],
+            limit=limit
+        )
+        
+        items = []
+        for item in results:
+            meta = item.get("metadata", {})
+            
+            if isinstance(meta, str):
+                import json
+                meta = json.loads(meta)
+            
+            items.append({
+                "id": item.get("id"),
+                "doc_id": item.get("doc_id"),
+                "chunk_text": item.get("chunk_text", ""),  # 전체 텍스트
+                "metadata": {
+                    "country": meta.get("country"),
+                    "country_name": meta.get("country_name"),
+                    "constitution_title": meta.get("constitution_title"),
+                    "page": meta.get("page"),
+                    "seq": meta.get("seq"),
+                    "doc_id": meta.get("doc_id"),
+                }
+            })
+        
+        return {
+            "collection": collection_name,
+            "total_shown": len(items),
+            "limit": limit,
+            "items": items
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Milvus peek 실패: {e}")
 
 @router.get("/stats")
 async def get_constitution_stats():
