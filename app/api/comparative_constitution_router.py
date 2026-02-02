@@ -313,29 +313,37 @@ async def upload_constitution(
         if replace_existing:
             collection_name = os.getenv("MILVUS_COLLECTION", "library_books")
             collection = get_collection(collection_name, dim=1024)
-            
+
             try:
-                # 기존 문서 검색
                 expr = f'metadata["country"] == "{country_code}" && metadata["doc_type"] == "constitution"'
-                
+
                 existing = collection.query(
                     expr=expr,
                     output_fields=["id"],
-                    limit=1000
+                    limit=10000
                 )
-                
-        if existing:
-            ids = [x["id"] for x in existing if "id" in x]
-            if ids:
-                id_list_str = ", ".join(map(str, ids))
-                collection.delete(f"id in [{id_list_str}]")  # ✅ pk delete
-                collection.flush()
-                try:
-                    collection.compact()
-                except:
-                    pass
 
-        # 4. 제목 자동 생성
+                if existing:
+                    ids = [x["id"] for x in existing if "id" in x]
+
+                    if ids:
+                        print(f"[CONSTITUTION] 기존 문서 발견: {len(ids)} chunks")
+
+                        id_list_str = ", ".join(map(str, ids))
+                        collection.delete(f"id in [{id_list_str}]")
+                        collection.flush()
+
+                        print("[CONSTITUTION] 기존 문서 삭제 완료 (flush)")
+
+                        try:
+                            collection.compact()
+                            print("[CONSTITUTION] Compaction 시작")
+                        except Exception as e:
+                            print(f"[CONSTITUTION] Compaction 오류 (무시): {e}")
+
+            except Exception as e:
+                print(f"[CONSTITUTION] 기존 문서 삭제 오류 (무시): {e}")
+       # 4. 제목 자동 생성
         if not title:
             title = f"{country_info.name_ko} 헌법"
         
