@@ -6,9 +6,9 @@
   <!-- [E] skip menu -->
 
   <!-- [S] contents_wrap -->
-  <div class="contents_wrap flex flex-1" id="contents_wrap">
+  <div class="contents_wrap" id="contents_wrap">
     <!-- [S] left_menu_wrap -->
-    <div class="left_menu_wrap flex">
+    <div class="left_menu_wrap">
       <div class="left_menu_hd">
         <img
           src="/img/layout/hd_logo.svg"
@@ -297,6 +297,9 @@
 
 <script setup>
 import { onMounted, onBeforeUnmount, useHead } from "#imports";
+definePageMeta({
+  layout: false,
+});
 
 // ✅ public 아래로 옮긴다고 했으니 /css, /img 로 고정
 useHead({

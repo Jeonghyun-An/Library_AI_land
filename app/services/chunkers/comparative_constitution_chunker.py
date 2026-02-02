@@ -65,6 +65,7 @@ class ConstitutionChunk:
     
     # 기타
     indexed_at: Optional[str] = None
+    original_bilingual_text: Optional[str] = None
     
     def to_dict(self) -> Dict:
         """Milvus 저장용 딕셔너리 변환"""
@@ -93,164 +94,278 @@ class ConstitutionChunk:
 
 
 class ComparativeConstitutionChunker:
-    """
-    비교헌법 청킹 클래스
-    - 조(Article) 레벨로 청킹
-    - 계층 구조 완전 보존
-    - bbox 좌표 추출
-    """
-    
-    def __init__(self, target_tokens: int = 512):
+    def __init__(self, target_tokens: int =6000):  # bge-m3 8192 → 안전 마진
         self.target_tokens = target_tokens
         
-        # 국가별 패턴 (확장 가능)
         self.patterns = {
             "KR": {
                 "chapter": re.compile(r'제\s*(\d+)\s*장\s*([^\n]*)', re.MULTILINE),
-                "article": re.compile(r'(제\s*(\d+)\s*조)', re.MULTILINE),
-                "paragraph": re.compile(r'[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]'),
+                "article": re.compile(r'(제\s*(\d+)\s*조(?:\(\d+\))?)', re.MULTILINE),
+                "paragraph": re.compile(r'[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]|\(\d+\)'),
             },
-            "EN": {  # 영어권 공통
-                "part": re.compile(r'PART\s+([IVX]+|[0-9]+)\s*[-:.]?\s*([^\n]*)', re.IGNORECASE),
-                "chapter": re.compile(r'CHAPTER\s+([IVX]+|[0-9]+)\s*[-:.]?\s*([^\n]*)', re.IGNORECASE),
-                "article": re.compile(r'(Article\s+(\d+))', re.IGNORECASE),
-                "subsection": re.compile(r'\((\d+)\)'),
+            "EN": {
+                "article": re.compile( r'(Article\s+(\d+)(?:\s*\([A-Za-z0-9]+\))?)', re.IGNORECASE),
+                "subsection": re.compile(r'\((\d+)\)|\([a-z]\)'),
             }
         }
+    def _estimate_tokens(self, text: str) -> int:
+        """bge-m3 근사 토큰 수 (한국어: 바이트//3, 영어: 단어*1.3)"""
+        if not text:
+            return 0
+        char_count = len(text)
+        word_count = len(text.split())
+        return int(char_count * 1.3 + word_count * 0.5)  # 보수적 추정
     
     def chunk_from_pdf(
-        self,
-        pdf_path: str,
-        doc_id: str,
-        country: str = "KR",
-        constitution_title: str = "",
-        version: Optional[str] = None,
-        is_bilingual: bool = False
-    ) -> List[ConstitutionChunk]:
-        """
-        PDF에서 직접 청킹 (bbox 정보 포함)
-        
-        Args:
-            pdf_path: PDF 파일 경로
-            doc_id: 문서 ID
-            country: 국가 코드
-            constitution_title: 헌법 제목
-            version: 버전 (개정일)
-            is_bilingual: 이중언어 여부
-        """
-        # 1. PDF 파싱 (텍스트 + bbox)
-        pages_with_bbox = self._parse_pdf_with_bbox(pdf_path)
-        
-        # 2. 문서 타입 자동 감지
-        doc_pattern = self._detect_document_pattern(pages_with_bbox)
-        
-        # 3. 패턴별 청킹
-        if country == "KR" or doc_pattern == "korean_constitution":
-            chunks = self._chunk_korean_constitution(
-                pages_with_bbox, doc_id, constitution_title, version
-            )
-        elif is_bilingual or doc_pattern == "bilingual":
-            chunks = self._chunk_bilingual_constitution(
-                pages_with_bbox, doc_id, country, constitution_title, version
-            )
-        elif doc_pattern == "english_only":
-            chunks = self._chunk_english_only_constitution(
-                pages_with_bbox, doc_id, country, constitution_title, version
-            )
-        else:
-            chunks = self._chunk_korean_translation_constitution(
-                pages_with_bbox, doc_id, country, constitution_title, version
-            )
-        
-        return chunks
+            self,
+            pdf_path: str,
+            doc_id: str,
+            country: str = "KR",
+            constitution_title: str = "",
+            version: Optional[str] = None,
+            is_bilingual: bool = False
+        ) -> List[ConstitutionChunk]:
+            pages_with_bbox = self._parse_pdf_with_bbox(pdf_path)
+            doc_pattern = self._detect_document_pattern(pages_with_bbox)
+
+            if country == "KR" or doc_pattern == "korean_constitution":
+                chunks = self._chunk_korean_constitution(pages_with_bbox, doc_id, constitution_title, version)
+            elif is_bilingual or doc_pattern in ["bilingual", "mixed"]:
+                chunks = self._chunk_bilingual_constitution(pages_with_bbox, doc_id, country, constitution_title, version)
+            elif doc_pattern == "english_only":
+                chunks = self._chunk_english_only_constitution(pages_with_bbox, doc_id, country, constitution_title, version)
+            else:
+                chunks = self._chunk_korean_translation_constitution(pages_with_bbox, doc_id, country, constitution_title, version)
+
+            # 토큰 기반 분할 (bge-m3 호환)
+            chunks = self._split_oversized_chunks(chunks)
+
+            for i, chunk in enumerate(chunks):
+                chunk.seq = i
+
+            return chunks
     
     def _parse_pdf_with_bbox(self, pdf_path: str) -> List[Dict]:
-        """
-        PDF 파싱 (텍스트 + bbox 좌표)
-        
-        Returns:
-            [
-                {
-                    "page": 1,
-                    "text": "전체 텍스트",
-                    "blocks": [
-                        {
-                            "text": "제10조",
-                            "bbox": [x, y, width, height],
-                            "font_size": 14.0
-                        },
-                        ...
-                    ]
-                },
-                ...
-            ]
-        """
-        doc = fitz.open(pdf_path)
-        pages = []
-        
-        for page_no in range(len(doc)):
-            page = doc[page_no]
-            
-            # 전체 텍스트
-            full_text = page.get_text()
-            
-            # 텍스트 블록 (bbox 포함)
-            blocks = []
-            text_dict = page.get_text("dict")
-            
-            for block in text_dict.get("blocks", []):
-                if block.get("type") == 0:  # 텍스트 블록
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            bbox = span.get("bbox", [0, 0, 0, 0])  # [x0, y0, x1, y1]
-                            blocks.append({
-                                "text": span.get("text", ""),
-                                "bbox": [
-                                    bbox[0],  # x
-                                    bbox[1],  # y
-                                    bbox[2] - bbox[0],  # width
-                                    bbox[3] - bbox[1],  # height
-                                ],
-                                "font_size": span.get("size", 12.0)
-                            })
-            
-            pages.append({
-                "page": page_no + 1,
-                "text": full_text,
-                "blocks": blocks
-            })
-        
-        doc.close()
-        return pages
+            doc = fitz.open(pdf_path)
+            pages = []
+
+            for page_no in range(len(doc)):
+                page = doc[page_no]
+                full_text = page.get_text()
+
+                blocks = []
+                text_dict = page.get_text("dict")
+
+                for block in text_dict.get("blocks", []):
+                    if block.get("type") == 0:
+                        for line in block.get("lines", []):
+                            for span in line.get("spans", []):
+                                text = span.get("text", "").strip()
+                                if not text:
+                                    continue
+                                bbox = span.get("bbox", [0,0,0,0])
+                                blocks.append({
+                                    "text": text,
+                                    "bbox": [bbox[0], bbox[1], bbox[2]-bbox[0], bbox[3]-bbox[1]],
+                                    "font_size": span.get("size", 12.0),
+                                    "lang": self._detect_span_language(text)
+                                })
+
+                pages.append({
+                    "page": page_no + 1,
+                    "text": full_text,
+                    "blocks": blocks
+                })
+
+            doc.close()
+            return pages
     
-    def _detect_document_pattern(self, pages: List[Dict]) -> str:
-        """문서 패턴 자동 감지"""
-        full_text = " ".join(p["text"] for p in pages[:3])  # 앞 3페이지만
+    def _detect_span_language(self, text: str) -> str:
+            """span 단위 언어 판별"""
+            ko_count = sum(1 for c in text if '\uac00' <= c <= '\ud7a3')
+            en_count = sum(1 for c in text if c.isalpha() and ord(c) < 128)
+            total = ko_count + en_count
+            if total == 0:
+                return "unknown"
+            if ko_count / total > 0.6:
+                return "ko"
+            if en_count / total > 0.6:
+                return "en"
+            return "mixed"
         
-        # 한국 헌법
+    def _detect_document_pattern(self, pages: List[Dict]) -> str:
+        full_text = " ".join(p["text"] for p in pages[:5])  # 더 많은 페이지 확인
         if "대한민국헌법" in full_text and "제1조" in full_text:
             return "korean_constitution"
         
-        # 영어 비율 계산
-        english_chars = sum(1 for c in full_text if c.isalpha() and ord(c) < 128)
-        korean_chars = sum(1 for c in full_text if '\uac00' <= c <= '\ud7a3')
-        total_chars = english_chars + korean_chars
-        
-        if total_chars == 0:
+        blocks = [b for p in pages[:5] for b in p["blocks"]]
+        en = sum(1 for b in blocks if b["lang"] == "en")
+        ko = sum(1 for b in blocks if b["lang"] == "ko")
+        total = en + ko
+        if total == 0:
             return "unknown"
-        
-        english_ratio = english_chars / total_chars
-        
-        # 이중언어
-        if 0.3 < english_ratio < 0.7 and korean_chars > 100:
+        en_ratio = en / total
+        if 0.35 < en_ratio < 0.65:
             return "bilingual"
-        
-        # 영어만
-        if english_ratio > 0.8:
+        if en_ratio > 0.75:
             return "english_only"
-        
-        # 한글 번역만
         return "korean_translation"
+    
+    # ==================== 긴 청크 자동 분할 ====================
+    
+    def _split_oversized_chunks(self, chunks, max_tokens=7000, min_chars=1500):
+        result: List[ConstitutionChunk] = []
+        para_pattern = self.patterns["KR"]["paragraph"]
+    
+        for chunk in chunks:
+            text = chunk.korean_text or ""
+            tok = self._estimate_tokens(text)
+    
+            # 충분히 짧고/의미 있는 길이면 그대로
+            if tok <= max_tokens and len(text) >= min_chars:
+                result.append(chunk)
+                continue
+            
+            # 항(①②③ / (1)(2) 등) 단위 split
+            parts = [p.strip() for p in para_pattern.split(text) if p and p.strip()]
+    
+            if len(parts) <= 1:
+                result.append(chunk)
+                continue
+            
+            # sub-chunk 생성
+            for p_idx, part in enumerate(parts, start=1):
+                sub = ConstitutionChunk(
+                    doc_id=chunk.doc_id,
+                    seq=chunk.seq,  # 나중에 재조정됨
+                    country=chunk.country,
+                    country_name=chunk.country_name,
+                    constitution_title=chunk.constitution_title,
+                    version=chunk.version,
+                    structure={**(chunk.structure or {}), "paragraph_number": p_idx},
+                    display_path=f"{chunk.display_path} (para {p_idx})",
+                    full_path=f"{chunk.full_path} (para {p_idx})",
+                    english_text=None,
+                    korean_text=part,
+                    text_type=chunk.text_type,
+                    has_english=chunk.has_english,
+                    has_korean=True,
+                    search_text=(chunk.search_text[:200] + " " + part[:400])[:1500],
+                    page=chunk.page,
+                    page_english=chunk.page_english,
+                    page_korean=chunk.page_korean,
+                    bbox_info=(chunk.bbox_info or [])[:5],
+                    indexed_at=chunk.indexed_at,
+                )
+                result.append(sub)
+    
+        return result
+    
+    
+    def _split_text_by_sentences(
+        self,
+        text: str,
+        max_length: int,
+        sentence_pattern: re.Pattern
+    ) -> List[str]:
+        """
+        텍스트를 문장 단위로 분할
+        
+        Returns:
+            분할된 텍스트 리스트
+        """
+        if not text or len(text) <= max_length:
+            return [text] if text else []
+        
+        sentences = sentence_pattern.findall(text)
+        
+        parts = []
+        current_text = ""
+        
+        for sentence in sentences:
+            # 현재 텍스트 + 새 문장 = 제한 초과?
+            if len(current_text) + len(sentence) > max_length and current_text:
+                parts.append(current_text.strip())
+                current_text = sentence
+            else:
+                current_text += sentence
+        
+        # 마지막 남은 텍스트
+        if current_text.strip():
+            parts.append(current_text.strip())
+        
+        return parts
+    
+    # 유지
+    def _create_sub_chunk(
+        self,
+        chunk: ConstitutionChunk,
+        korean_text: str,
+        english_text: str,
+        part_num: int,
+        total_parts: int
+    ) -> ConstitutionChunk:
+        """
+        원본 청크에서 서브 청크 생성
+        
+        Args:
+            chunk: 원본 청크
+            korean_text: 서브 청크 한글 텍스트
+            english_text: 서브 청크 영어 텍스트
+            part_num: 파트 번호 (0, 1, 2, ...)
+            total_parts: 총 파트 수
+        
+        Returns:
+            새 ConstitutionChunk
+        """
+        # 파트 표시
+        part_suffix = f" (part {part_num + 1}/{total_parts})" if total_parts > 1 else ""
+        
+        # 검색 텍스트 생성
+        search_parts = []
+        if korean_text:
+            search_parts.append(korean_text[:300])
+        if english_text:
+            search_parts.append(english_text[:300])
+        search_text = " ".join(search_parts)
+        
+        sub_chunk = ConstitutionChunk(
+            doc_id=chunk.doc_id,
+            seq=chunk.seq,  # 나중에 재조정
+            country=chunk.country,
+            country_name=chunk.country_name,
+            constitution_title=chunk.constitution_title,
+            version=chunk.version,
+            
+            # 구조 정보 복사
+            structure=chunk.structure.copy() if chunk.structure else {},
+            
+            # 표시 경로에 파트 번호 추가
+            display_path=chunk.display_path + part_suffix,
+            full_path=chunk.full_path + part_suffix,
+            
+            # 텍스트 분할
+            korean_text=korean_text if korean_text else None,
+            english_text=english_text if english_text else None,
+            
+            # 텍스트 타입
+            text_type=chunk.text_type,
+            has_english=bool(english_text),
+            has_korean=bool(korean_text),
+            
+            # 검색 텍스트
+            search_text=search_text,
+            
+            # 페이지/bbox 정보 복사
+            page=chunk.page,
+            page_english=chunk.page_english,
+            page_korean=chunk.page_korean,
+            bbox_info=chunk.bbox_info[:5] if chunk.bbox_info else [],  # 일부만
+            
+            indexed_at=chunk.indexed_at,
+        )
+        
+        return sub_chunk
     
     # ==================== 한국 헌법 청킹 ====================
     
@@ -355,89 +470,60 @@ class ComparativeConstitutionChunker:
     # ==================== 이중언어 헌법 청킹 ====================
     
     def _chunk_bilingual_constitution(
-        self,
-        pages: List[Dict],
-        doc_id: str,
-        country: str,
-        constitution_title: str,
-        version: Optional[str]
-    ) -> List[ConstitutionChunk]:
-        """이중언어 헌법 청킹 (좌우 페이지 병렬)"""
-        chunks = []
-        
-        # 페이지를 영어/한글로 분류
-        english_pages = []
-        korean_pages = []
-        
-        for page_data in pages:
-            text = page_data["text"]
-            english_ratio = sum(1 for c in text if c.isalpha() and ord(c) < 128) / (len(text) + 1)
-            
-            if english_ratio > 0.6:
-                english_pages.append(page_data)
-            else:
-                korean_pages.append(page_data)
-        
-        # 영어 조항 추출
-        english_articles = self._extract_articles_bilingual(english_pages, lang="en")
-        
-        # 한글 번역 추출
-        korean_articles = self._extract_articles_bilingual(korean_pages, lang="ko")
-        
-        # 조항 번호로 매칭
-        all_article_nums = sorted(
-            set(english_articles.keys()) | set(korean_articles.keys()),
-            key=lambda x: int(x) if x.isdigit() else 0
-        )
-        
-        for i, article_num in enumerate(all_article_nums):
-            en_data = english_articles.get(article_num, {})
-            ko_data = korean_articles.get(article_num, {})
-            
-            # bbox 정보
-            en_bbox = en_data.get("bbox", [])
-            ko_bbox = ko_data.get("bbox", [])
-            
-            chunk = ConstitutionChunk(
-                doc_id=doc_id,
-                seq=i,
-                country=country,
-                country_name=self._get_country_name(country),
-                constitution_title=constitution_title,
-                version=version,
-                structure={
-                    "part_number": en_data.get("part_number") or ko_data.get("part_number"),
-                    "part_title": en_data.get("part_title") or ko_data.get("part_title"),
-                    "chapter_number": None,
-                    "article_number": article_num,
-                    "article_title": en_data.get("article_title", ""),
-                    "has_paragraphs": True,
-                    "paragraph_count": max(
-                        len(self.patterns["EN"]["subsection"].findall(en_data.get("text", ""))),
-                        len(self.patterns["EN"]["subsection"].findall(ko_data.get("text", "")))
-                    ),
-                },
-                display_path=f"Article {article_num}",
-                full_path=f"Article {article_num}",
-                english_text=en_data.get("text"),
-                korean_text=ko_data.get("text"),
-                text_type="bilingual",
-                has_english=bool(en_data.get("text")),
-                has_korean=bool(ko_data.get("text")),
-                search_text=self._build_search_text(
-                    None, article_num, 
-                    ko_data.get("text", ""), 
-                    en_data.get("text")
-                ),
-                page=en_data.get("page", ko_data.get("page", 1)),
-                page_english=en_data.get("page"),
-                page_korean=ko_data.get("page"),
-                bbox_info=en_bbox + ko_bbox,
-            )
-            
-            chunks.append(chunk)
-        
-        return chunks
+            self,
+            pages: List[Dict],
+            doc_id: str,
+            country: str,
+            constitution_title: str,
+            version: Optional[str]
+        ) -> List[ConstitutionChunk]:
+            chunks = []
+
+            english_pages = [p for p in pages if sum(1 for b in p["blocks"] if b["lang"]=="en") / max(1, len(p["blocks"])) > 0.55]
+            korean_pages = [p for p in pages if sum(1 for b in p["blocks"] if b["lang"]=="ko") / max(1, len(p["blocks"])) > 0.55]
+
+            english_articles = self._extract_articles_bilingual(english_pages, "en")
+            korean_articles = self._extract_articles_bilingual(korean_pages, "ko")
+
+            all_nums = [n for n in set(english_articles.keys()) | set(korean_articles.keys()) if n]
+            all_nums = sorted(all_nums, key=lambda x: int(x) if str(x).isdigit() else 10**9)
+
+            for i, num in enumerate(all_nums):
+                en = english_articles.get(num, {})
+                ko = korean_articles.get(num, {})
+
+                # 텍스트 정제: 혼입 제거
+                en_text = re.sub(r'[\uac00-\ud7a3]+', '', en.get("text", "")).strip() if en.get("text") else None
+                ko_text = re.sub(r'[A-Za-z]{3,}', '', ko.get("text", "")).strip() if ko.get("text") else None
+
+                if not ko_text and not en_text:
+                    continue
+                
+                chunk = ConstitutionChunk(
+                    doc_id=doc_id,
+                    seq=i,
+                    country=country,
+                    country_name=self._get_country_name(country),
+                    constitution_title=constitution_title,
+                    version=version,
+                    structure={...},  # 기존 구조 유지
+                    display_path=f"Article {num}",
+                    full_path=f"Article {num}",
+                    english_text=en_text,
+                    korean_text=ko_text,
+                    text_type="bilingual" if en_text and ko_text else ("english_only" if en_text else "korean_only"),
+                    has_english=bool(en_text),
+                    has_korean=bool(ko_text),
+                    search_text=self._build_search_text(None, num, ko_text or "", None),  # 한국어 우선
+                    page=ko.get("page") or en.get("page", 1),
+                    page_korean=ko.get("page"),
+                    page_english=en.get("page"),
+                    bbox_info=(en.get("bbox", []) + ko.get("bbox", []))[:15],
+                    original_bilingual_text=ko.get("text") or en.get("text"),  # 원본 보관
+                )
+                chunks.append(chunk)
+
+            return chunks
     
     def _extract_articles_bilingual(
         self, 
@@ -550,28 +636,21 @@ class ComparativeConstitutionChunker:
         return 1, []
     
     def _build_search_text(
-        self,
-        chapter: Optional[Dict],
-        article_num: str,
-        korean_text: str,
-        english_text: Optional[str]
-    ) -> str:
-        """검색용 통합 텍스트 생성"""
-        parts = []
-        
-        if chapter:
-            parts.append(f"제{chapter.get('number')}장")
-            parts.append(chapter.get('title', ''))
-        
-        parts.append(f"제{article_num}조" if korean_text else f"Article {article_num}")
-        
-        if korean_text:
-            parts.append(korean_text[:200])
-        
-        if english_text:
-            parts.append(english_text[:200])
-        
-        return " ".join(parts)
+            self,
+            chapter: Optional[Dict],
+            article_num: str,
+            korean_text: str,
+            english_text: Optional[str]
+        ) -> str:
+            parts = []
+            if chapter:
+                parts.append(f"제{chapter.get('number')}장 {chapter.get('title', '')}")
+            parts.append(f"제{article_num}조")
+            if korean_text:
+                # bge-m3 최적화: 한국어 본문만 넣음 (영어는 노이즈)
+                clean_ko = re.sub(r'[A-Za-z]{3,}', '', korean_text)  # 영어 단어 제거
+                parts.append(clean_ko[:400])  # 길이 제한
+            return " ".join(parts).strip()[:1500]
     
     def _get_country_name(self, country_code: str) -> str:
         """국가 코드 → 국가명 (레지스트리 사용)"""
@@ -589,7 +668,6 @@ def chunk_constitution_document(
     version: Optional[str] = None,
     is_bilingual: bool = False
 ) -> List[ConstitutionChunk]:
-    """헌법 문서 청킹 편의 함수"""
     chunker = ComparativeConstitutionChunker(target_tokens=512)
     return chunker.chunk_from_pdf(
         pdf_path, doc_id, country, constitution_title, version, is_bilingual
