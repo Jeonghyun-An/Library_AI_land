@@ -468,7 +468,7 @@
 
             <div class="loading_wrap">
               <div class="circle_wrap">
-                <img src="/img/icon/ic_ing.svg" alt="" class="circle_img" />
+                <img src="/img/icon/ic_ing.gif" alt="" class="circle_img" />
               </div>
               <div class="loading_txt">답변 생성 중 입니다...</div>
             </div>
