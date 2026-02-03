@@ -245,6 +245,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.nuxt
     container_name: library-nuxt
+    volumes:
+      - ../frontend:/app
     environment:
       NUXT_PUBLIC_API_BASE: "/api"
       NITRO_HOST: "0.0.0.0"
