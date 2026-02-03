@@ -460,9 +460,10 @@
                 <img src="/img/icon/ic_country.svg" alt="" class="ic" />국가선택
               </div>
 
-              <!-- 탭 (대륙별) -->
+              <!-- 탭 (대륙별) - 검색 결과가 있는 대륙만 표시 -->
               <div class="sc_tab_wrap">
                 <div class="sc_tab_btn_wrap">
+                  <!-- 대한민국 탭 (항상 표시) -->
                   <a
                     href="#;"
                     class="tab_btn"
@@ -471,7 +472,10 @@
                     @click.prevent="selectedContinent = 'korea'"
                     >대한민국</a
                   >
+
+                  <!-- 검색 결과가 있는 대륙만 동적 표시 -->
                   <a
+                    v-if="availableContinents.includes('asia')"
                     href="#;"
                     class="tab_btn"
                     :class="{ on: selectedContinent === 'asia' }"
@@ -479,7 +483,9 @@
                     @click.prevent="selectedContinent = 'asia'"
                     >아시아</a
                   >
+
                   <a
+                    v-if="availableContinents.includes('europe')"
                     href="#;"
                     class="tab_btn"
                     :class="{ on: selectedContinent === 'europe' }"
@@ -487,7 +493,9 @@
                     @click.prevent="selectedContinent = 'europe'"
                     >유럽</a
                   >
+
                   <a
+                    v-if="availableContinents.includes('africa')"
                     href="#;"
                     class="tab_btn"
                     :class="{ on: selectedContinent === 'africa' }"
@@ -495,13 +503,35 @@
                     @click.prevent="selectedContinent = 'africa'"
                     >아프리카</a
                   >
+
                   <a
+                    v-if="availableContinents.includes('americas')"
+                    href="#;"
+                    class="tab_btn"
+                    :class="{ on: selectedContinent === 'americas' }"
+                    data-target="#panel_americas"
+                    @click.prevent="selectedContinent = 'americas'"
+                    >아메리카</a
+                  >
+
+                  <a
+                    v-if="availableContinents.includes('oceania')"
                     href="#;"
                     class="tab_btn"
                     :class="{ on: selectedContinent === 'oceania' }"
                     data-target="#panel_oceania"
                     @click.prevent="selectedContinent = 'oceania'"
                     >오세아니아</a
+                  >
+
+                  <a
+                    v-if="availableContinents.includes('middle_east')"
+                    href="#;"
+                    class="tab_btn"
+                    :class="{ on: selectedContinent === 'middle_east' }"
+                    data-target="#panel_middle_east"
+                    @click.prevent="selectedContinent = 'middle_east'"
+                    >중동</a
                   >
                 </div>
 
@@ -516,6 +546,7 @@
                       <a
                         href="#;"
                         class="sc_menu_item"
+                        :class="{ on: !selectedForeignCountry }"
                         @click.prevent="selectedForeignCountry = null"
                       >
                         <span class="inn_txt">대한민국</span>
@@ -526,102 +557,29 @@
                     </div>
                   </div>
 
-                  <!-- 아시아 -->
+                  <!-- 검색 결과가 있는 대륙별 동적 표시 -->
                   <div
+                    v-for="continent in availableContinents"
+                    :key="continent"
                     class="sc_menu_wrap"
-                    :class="{ on: selectedContinent === 'asia' }"
-                    id="panel_asia"
+                    :class="{ on: selectedContinent === continent }"
+                    :id="`panel_${continent}`"
                   >
                     <div class="sc_menu">
                       <a
-                        v-for="country in getCountriesByContinent('asia')"
+                        v-for="country in getCountriesByContinent(continent)"
                         :key="country.code"
                         href="#;"
                         class="sc_menu_item"
                         :class="{ on: selectedForeignCountry === country.code }"
                         @click.prevent="selectedForeignCountry = country.code"
                       >
-                        <span class="txt_underline"
-                          ><span class="inn_txt">{{ country.name }}</span></span
-                        >
-                        <span class="flag"
-                          ><img src="/img/sub/img_flag.svg" alt=""
-                        /></span>
-                      </a>
-                    </div>
-                  </div>
-
-                  <!-- 유럽 -->
-                  <div
-                    class="sc_menu_wrap"
-                    :class="{ on: selectedContinent === 'europe' }"
-                    id="panel_europe"
-                  >
-                    <div class="sc_menu">
-                      <a
-                        v-for="country in getCountriesByContinent('europe')"
-                        :key="country.code"
-                        href="#;"
-                        class="sc_menu_item"
-                        :class="{ on: selectedForeignCountry === country.code }"
-                        @click.prevent="selectedForeignCountry = country.code"
-                      >
-                        <span class="txt_underline"
-                          ><span class="inn_txt">{{ country.name }}</span></span
-                        >
-                        <span class="flag"
-                          ><img src="/img/sub/img_flag.svg" alt=""
-                        /></span>
-                      </a>
-                    </div>
-                  </div>
-
-                  <!-- 아프리카 -->
-                  <div
-                    class="sc_menu_wrap"
-                    :class="{ on: selectedContinent === 'africa' }"
-                    id="panel_africa"
-                  >
-                    <div class="sc_menu">
-                      <a
-                        v-for="country in getCountriesByContinent('africa')"
-                        :key="country.code"
-                        href="#;"
-                        class="sc_menu_item"
-                        :class="{ on: selectedForeignCountry === country.code }"
-                        @click.prevent="selectedForeignCountry = country.code"
-                      >
-                        <span class="txt_underline"
-                          ><span class="inn_txt">{{ country.name }}</span></span
-                        >
-                        <span class="flag"
-                          ><img src="/img/sub/img_flag.svg" alt=""
-                        /></span>
-                      </a>
-                    </div>
-                  </div>
-
-                  <!-- 오세아니아 -->
-                  <div
-                    class="sc_menu_wrap"
-                    :class="{ on: selectedContinent === 'oceania' }"
-                    id="panel_oceania"
-                  >
-                    <div class="sc_menu">
-                      <a
-                        v-for="country in getCountriesByContinent('oceania')"
-                        :key="country.code"
-                        href="#;"
-                        class="sc_menu_item"
-                        :class="{ on: selectedForeignCountry === country.code }"
-                        @click.prevent="selectedForeignCountry = country.code"
-                      >
-                        <span class="txt_underline"
-                          ><span class="inn_txt">{{ country.name }}</span></span
-                        >
-                        <span class="flag"
-                          ><img src="/img/sub/img_flag.svg" alt=""
-                        /></span>
+                        <span class="txt_underline">
+                          <span class="inn_txt">{{ country.name }}</span>
+                        </span>
+                        <span class="flag">
+                          <img src="/img/sub/img_flag.svg" alt="" />
+                        </span>
                       </a>
                     </div>
                   </div>
@@ -640,44 +598,73 @@
                       <div
                         v-for="(result, idx) in koreanResults"
                         :key="`kr-${idx}`"
-                        style="padding: 15px; border-bottom: 1px solid #eee"
+                        style="
+                          margin-bottom: 20px;
+                          border: 1px solid #e5e7eb;
+                          border-radius: 8px;
+                          overflow: hidden;
+                        "
                       >
+                        <!-- PDF 페이지 이미지 -->
                         <div
+                          v-if="result.page"
                           style="
-                            font-weight: bold;
-                            color: #2563eb;
-                            margin-bottom: 8px;
+                            background: #f9fafb;
+                            padding: 10px;
+                            border-bottom: 1px solid #e5e7eb;
                           "
                         >
-                          {{ result.structure.article_number || "조항" }}
-                          <span
-                            v-if="result.structure.chapter_title"
+                          <img
+                            :src="loadPdfImage(result)"
+                            alt="PDF 페이지"
+                            style="width: 100%; height: auto; display: block"
+                            @error="$event.target.style.display = 'none'"
+                          />
+                        </div>
+
+                        <!-- 조항 정보 -->
+                        <div style="padding: 15px">
+                          <div
                             style="
-                              font-size: 0.9em;
-                              color: #666;
-                              margin-left: 8px;
+                              font-weight: bold;
+                              color: #2563eb;
+                              margin-bottom: 8px;
                             "
                           >
-                            {{ result.structure.chapter_title }}
-                          </span>
-                        </div>
-                        <div style="line-height: 1.6">
-                          {{ result.korean_text || result.english_text }}
-                        </div>
-                        <div
-                          style="
-                            margin-top: 8px;
-                            font-size: 0.85em;
-                            color: #999;
-                          "
-                        >
-                          유사도: {{ (result.score * 100).toFixed(1) }}% |
-                          페이지: {{ result.page }}
+                            {{ result.structure.article_number || "조항" }}
+                            <span
+                              v-if="result.structure.chapter_title"
+                              style="
+                                font-size: 0.9em;
+                                color: #666;
+                                margin-left: 8px;
+                              "
+                            >
+                              {{ result.structure.chapter_title }}
+                            </span>
+                          </div>
+                          <div style="line-height: 1.6; color: #374151">
+                            {{ result.korean_text || result.english_text }}
+                          </div>
+                          <div
+                            style="
+                              margin-top: 8px;
+                              font-size: 0.85em;
+                              color: #6b7280;
+                            "
+                          >
+                            유사도: {{ (result.score * 100).toFixed(1) }}% |
+                            페이지: {{ result.page }}
+                          </div>
                         </div>
                       </div>
                       <div
                         v-if="koreanResults.length === 0"
-                        style="padding: 40px; text-align: center; color: #999"
+                        style="
+                          padding: 40px;
+                          text-align: center;
+                          color: #9ca3af;
+                        "
                       >
                         검색 결과가 없습니다.
                       </div>
@@ -696,57 +683,86 @@
                       <div
                         v-for="(result, idx) in displayedForeignResults"
                         :key="`foreign-${idx}`"
-                        style="padding: 15px; border-bottom: 1px solid #eee"
+                        style="
+                          margin-bottom: 20px;
+                          border: 1px solid #e5e7eb;
+                          border-radius: 8px;
+                          overflow: hidden;
+                        "
                       >
+                        <!-- PDF 페이지 이미지 -->
                         <div
+                          v-if="result.page"
                           style="
-                            font-weight: bold;
-                            color: #2563eb;
-                            margin-bottom: 8px;
+                            background: #f9fafb;
+                            padding: 10px;
+                            border-bottom: 1px solid #e5e7eb;
                           "
                         >
-                          {{ result.structure.article_number || "Article" }}
-                          <span
-                            v-if="result.structure.chapter_title"
+                          <img
+                            :src="loadPdfImage(result)"
+                            alt="PDF 페이지"
+                            style="width: 100%; height: auto; display: block"
+                            @error="$event.target.style.display = 'none'"
+                          />
+                        </div>
+
+                        <!-- 조항 정보 -->
+                        <div style="padding: 15px">
+                          <div
                             style="
-                              font-size: 0.9em;
-                              color: #666;
-                              margin-left: 8px;
+                              font-weight: bold;
+                              color: #2563eb;
+                              margin-bottom: 8px;
                             "
                           >
-                            {{ result.structure.chapter_title }}
-                          </span>
-                        </div>
-                        <div style="line-height: 1.6">
-                          <div
-                            v-if="result.has_korean"
-                            style="margin-bottom: 8px"
-                          >
-                            {{ result.korean_text }}
+                            {{ result.structure.article_number || "Article" }}
+                            <span
+                              v-if="result.structure.chapter_title"
+                              style="
+                                font-size: 0.9em;
+                                color: #666;
+                                margin-left: 8px;
+                              "
+                            >
+                              {{ result.structure.chapter_title }}
+                            </span>
+                          </div>
+                          <div style="line-height: 1.6">
+                            <div
+                              v-if="result.has_korean"
+                              style="margin-bottom: 8px; color: #374151"
+                            >
+                              {{ result.korean_text }}
+                            </div>
+                            <div
+                              v-if="result.has_english"
+                              style="color: #6b7280; font-size: 0.95em"
+                            >
+                              {{ result.english_text }}
+                            </div>
                           </div>
                           <div
-                            v-if="result.has_english"
-                            style="color: #666; font-size: 0.95em"
+                            style="
+                              margin-top: 8px;
+                              font-size: 0.85em;
+                              color: #6b7280;
+                            "
                           >
-                            {{ result.english_text }}
+                            유사도: {{ (result.score * 100).toFixed(1) }}% |
+                            페이지: {{ result.page }}
                           </div>
-                        </div>
-                        <div
-                          style="
-                            margin-top: 8px;
-                            font-size: 0.85em;
-                            color: #999;
-                          "
-                        >
-                          유사도: {{ (result.score * 100).toFixed(1) }}% |
-                          페이지: {{ result.page }}
                         </div>
                       </div>
                       <div
                         v-if="displayedForeignResults.length === 0"
-                        style="padding: 40px; text-align: center; color: #999"
+                        style="
+                          padding: 40px;
+                          text-align: center;
+                          color: #9ca3af;
+                        "
                       >
-                        검색 결과가 없습니다.sdsd
+                        국가를 선택하세요.
                       </div>
                     </div>
                   </div>
@@ -878,6 +894,9 @@ useHead({
   ],
 });
 
+// ==================== API Composable 사용 ====================
+const { comparativeSearch, getPdfPageImage } = useConstitutionAPI();
+
 // ==================== 상태 관리 ====================
 const searchQuery = ref("");
 const currentSearchQuery = ref("");
@@ -885,8 +904,39 @@ const hasSearched = ref(false);
 const isSearching = ref(false);
 const searchResult = ref(null);
 const searchHistory = ref([]);
-const selectedContinent = ref("africa"); // 기본값
+const selectedContinent = ref("korea"); // 기본값 변경
 const selectedForeignCountry = ref(null);
+
+// PDF 이미지 캐시
+const pdfImageCache = ref({});
+
+// ==================== PDF 이미지 로드 ====================
+async function loadPdfImage(result) {
+  // doc_id가 없으면 스킵
+  if (!result.structure?.doc_id && !result.country) {
+    return null;
+  }
+
+  // doc_id 생성 (metadata에서 가져오거나 추정)
+  const docId = result.structure?.doc_id || `${result.country}_latest`;
+  const page = result.page || 1;
+  const cacheKey = `${docId}_${page}`;
+
+  // 캐시 확인
+  if (pdfImageCache.value[cacheKey]) {
+    return pdfImageCache.value[cacheKey];
+  }
+
+  try {
+    // PNG 이미지 URL 가져오기
+    const imageUrl = await getPdfPageImage(docId, page, "png", 150);
+    pdfImageCache.value[cacheKey] = imageUrl;
+    return imageUrl;
+  } catch (error) {
+    console.error(`PDF 이미지 로드 실패: ${docId} page ${page}`, error);
+    return null;
+  }
+}
 
 // ==================== Computed ====================
 const groupedHistory = computed(() => {
@@ -900,37 +950,85 @@ const groupedHistory = computed(() => {
 });
 
 const koreanResults = computed(() => {
-  return searchResult.value?.korean_results || [];
+  if (!searchResult.value?.pairs || searchResult.value.pairs.length === 0) {
+    return [];
+  }
+  // pairs[0].korean = 한국 조항
+  return [searchResult.value.pairs[0].korean];
 });
 
-const foreignResults = computed(() => {
-  return searchResult.value?.foreign_results || [];
+// 외국 결과: pairs[0].foreign = { "GH": { items: [...] }, "NG": { items: [...] } }
+const foreignResultsByCountry = computed(() => {
+  if (!searchResult.value?.pairs || searchResult.value.pairs.length === 0) {
+    return {};
+  }
+
+  const allForeign = {};
+
+  searchResult.value.pairs.forEach((pair) => {
+    const foreignBlock = pair.foreign || {};
+
+    for (const [countryCode, countryData] of Object.entries(foreignBlock)) {
+      if (!allForeign[countryCode]) {
+        allForeign[countryCode] = {
+          items: [],
+          next_cursor: countryData.next_cursor,
+        };
+      }
+      allForeign[countryCode].items.push(...(countryData.items || []));
+    }
+  });
+
+  return allForeign;
 });
 
 const foreignCountries = computed(() => {
-  const countryMap = new Map();
-  foreignResults.value.forEach((result) => {
-    if (!countryMap.has(result.country)) {
-      countryMap.set(result.country, {
-        code: result.country,
-        name: result.country_name,
-        continent: result.continent || "asia",
+  const countries = [];
+
+  for (const [countryCode, countryData] of Object.entries(
+    foreignResultsByCountry.value,
+  )) {
+    if (countryData.items.length > 0) {
+      const firstItem = countryData.items[0];
+      countries.push({
+        code: countryCode,
+        name: firstItem.country_name,
+        continent: firstItem.continent || "asia",
       });
     }
+  }
+
+  return countries;
+});
+
+// 대륙별 국가 그룹핑
+const continentsWithCountries = computed(() => {
+  const continents = {};
+
+  foreignCountries.value.forEach((country) => {
+    const continent = country.continent;
+    if (!continents[continent]) {
+      continents[continent] = [];
+    }
+    continents[continent].push(country);
   });
-  return Array.from(countryMap.values());
+
+  return continents;
+});
+
+// 검색 결과가 있는 대륙만
+const availableContinents = computed(() => {
+  return Object.keys(continentsWithCountries.value);
 });
 
 const displayedForeignResults = computed(() => {
   if (!selectedForeignCountry.value) {
-    if (foreignCountries.value.length > 0) {
-      selectedForeignCountry.value = foreignCountries.value[0].code;
-    }
     return [];
   }
-  return foreignResults.value.filter(
-    (result) => result.country === selectedForeignCountry.value,
-  );
+
+  const countryData =
+    foreignResultsByCountry.value[selectedForeignCountry.value];
+  return countryData?.items || [];
 });
 
 const selectedCountryName = computed(() => {
@@ -941,7 +1039,7 @@ const selectedCountryName = computed(() => {
 });
 
 function getCountriesByContinent(continent) {
-  return foreignCountries.value.filter((c) => c.continent === continent);
+  return continentsWithCountries.value[continent] || [];
 }
 
 // ==================== API 호출 ====================
@@ -953,31 +1051,27 @@ async function handleSearch() {
   isSearching.value = true;
 
   try {
-    const config = useRuntimeConfig();
-    const apiBase = config.public.apiBase || "/api";
-
-    const response = await $fetch(
-      `${apiBase}/constitution/comparative-search`,
-      {
-        method: "POST",
-        body: {
-          query: searchQuery.value,
-          korean_top_k: 3,
-          foreign_top_k: 10,
-          generate_summary: true,
-        },
-      },
-    );
+    // Composable 사용
+    const response = await comparativeSearch({
+      query: searchQuery.value,
+      korean_top_k: 3,
+      foreign_per_country: 3,
+      foreign_pool_size: 50,
+      generate_summary: true,
+    });
 
     searchResult.value = response;
     addToHistory(searchQuery.value);
 
     // 첫 번째 외국 국가 자동 선택
     if (foreignCountries.value.length > 0) {
-      selectedForeignCountry.value = foreignCountries.value[0].code;
-      // 해당 국가의 대륙으로 탭 자동 전환
       const firstCountry = foreignCountries.value[0];
+      selectedForeignCountry.value = firstCountry.code;
       selectedContinent.value = firstCountry.continent;
+    } else {
+      // 외국 결과 없으면 한국 탭으로
+      selectedContinent.value = "korea";
+      selectedForeignCountry.value = null;
     }
   } catch (error) {
     console.error("검색 실패:", error);
