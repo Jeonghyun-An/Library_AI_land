@@ -32,7 +32,7 @@ export const useConstitutionAPI = () => {
   }) => {
     try {
       const response = await $fetch(
-        `${apiBase}/api/constitution/comparative-search`,
+        `${apiBase}/constitution/comparative-search`,
         {
           method: "POST",
           body: {
@@ -75,7 +75,7 @@ export const useConstitutionAPI = () => {
   }) => {
     try {
       const response = await $fetch(
-        `${apiBase}/api/constitution/comparative-summary`,
+        `${apiBase}/constitution/comparative-summary`,
         {
           method: "POST",
           body: {
@@ -126,7 +126,7 @@ export const useConstitutionAPI = () => {
         formData.append("replace_existing", params.replace_existing.toString());
       }
 
-      const response = await $fetch(`${apiBase}/api/constitution/upload`, {
+      const response = await $fetch(`${apiBase}/constitution/upload`, {
         method: "POST",
         body: formData,
       });
@@ -150,13 +150,10 @@ export const useConstitutionAPI = () => {
         formData.append("files", file);
       });
 
-      const response = await $fetch(
-        `${apiBase}/api/constitution/batch-upload`,
-        {
-          method: "POST",
-          body: formData,
-        },
-      );
+      const response = await $fetch(`${apiBase}/constitution/batch-upload`, {
+        method: "POST",
+        body: formData,
+      });
       return response;
     } catch (error: any) {
       console.error("[API] 일괄 업로드 실패:", error);
@@ -179,7 +176,7 @@ export const useConstitutionAPI = () => {
       if (params?.country) query.append("country", params.country);
       if (params?.limit) query.append("limit", params.limit.toString());
 
-      const url = `${apiBase}/api/constitution/list?${query.toString()}`;
+      const url = `${apiBase}/constitution/list?${query.toString()}`;
       const response = await $fetch(url, {
         method: "GET",
       });
@@ -198,7 +195,7 @@ export const useConstitutionAPI = () => {
   const deleteCountryConstitutions = async (countryCode: string) => {
     try {
       const response = await $fetch(
-        `${apiBase}/api/constitution/delete/country/${countryCode}`,
+        `${apiBase}/constitution/delete/country/${countryCode}`,
         {
           method: "DELETE",
         },
@@ -217,12 +214,9 @@ export const useConstitutionAPI = () => {
    */
   const deleteConstitution = async (docId: string) => {
     try {
-      const response = await $fetch(
-        `${apiBase}/api/constitution/delete/${docId}`,
-        {
-          method: "DELETE",
-        },
-      );
+      const response = await $fetch(`${apiBase}/constitution/delete/${docId}`, {
+        method: "DELETE",
+      });
       return response;
     } catch (error: any) {
       console.error("[API] 문서 삭제 실패:", error);
@@ -245,7 +239,7 @@ export const useConstitutionAPI = () => {
     dpi: number = 150,
   ) => {
     try {
-      const url = `${apiBase}/api/constitution/pdf/${docId}/page/${pageNo}?format=${format}&dpi=${dpi}`;
+      const url = `${apiBase}/constitution/pdf/${docId}/page/${pageNo}?format=${format}&dpi=${dpi}`;
 
       if (format === "base64") {
         // JSON 응답
@@ -271,7 +265,7 @@ export const useConstitutionAPI = () => {
    * @param inline - true=브라우저에서 보기, false=다운로드
    */
   const getPdfDownloadUrl = (docId: string, inline: boolean = true) => {
-    return `${apiBase}/api/constitution/pdf/${docId}/download?inline=${inline}`;
+    return `${apiBase}/constitution/pdf/${docId}/download?inline=${inline}`;
   };
 
   /**
@@ -282,8 +276,8 @@ export const useConstitutionAPI = () => {
   const getCountries = async (continent?: string) => {
     try {
       const url = continent
-        ? `${apiBase}/api/constitution/countries?continent=${continent}`
-        : `${apiBase}/api/constitution/countries`;
+        ? `${apiBase}/constitution/countries?continent=${continent}`
+        : `${apiBase}/constitution/countries`;
 
       const response = await $fetch(url, { method: "GET" });
       return response;
@@ -298,7 +292,7 @@ export const useConstitutionAPI = () => {
    */
   const getContinents = async () => {
     try {
-      const response = await $fetch(`${apiBase}/api/constitution/continents`, {
+      const response = await $fetch(`${apiBase}/constitution/continents`, {
         method: "GET",
       });
       return response;
@@ -313,7 +307,7 @@ export const useConstitutionAPI = () => {
    */
   const getStats = async () => {
     try {
-      const response = await $fetch(`${apiBase}/api/constitution/stats`, {
+      const response = await $fetch(`${apiBase}/constitution/stats`, {
         method: "GET",
       });
       return response;

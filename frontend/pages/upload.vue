@@ -501,13 +501,10 @@ const uploadBook = async () => {
     if (bookData.value.description)
       formData.append("description", bookData.value.description);
 
-    const response = await $fetch<UploadResponse>(
-      `${apiBase}/api/library/upload`,
-      {
-        method: "POST",
-        body: formData,
-      },
-    );
+    const response = await $fetch<UploadResponse>(`${apiBase}/library/upload`, {
+      method: "POST",
+      body: formData,
+    });
 
     if (response.success) {
       uploadProgress.value.steps[0].status = "completed";

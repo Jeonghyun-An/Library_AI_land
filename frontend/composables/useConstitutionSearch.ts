@@ -92,7 +92,7 @@ export const useConstitutionSearch = () => {
 
     try {
       const response = await $fetch<SearchResponse>(
-        `${apiBase}/api/constitution/search`,
+        `${apiBase}/constitution/search`,
         {
           method: "POST",
           body: {

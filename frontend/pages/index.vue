@@ -358,7 +358,7 @@ const performSearch = async () => {
   hasSearched.value = true;
 
   try {
-    const response = await $fetch<any>(`${apiBase}/api/library/search`, {
+    const response = await $fetch<any>(`${apiBase}/library/search`, {
       method: "POST",
       body: {
         query: searchQuery.value,

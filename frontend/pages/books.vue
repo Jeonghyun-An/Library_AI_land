@@ -369,7 +369,7 @@ const loadBooks = async (loadMore = false) => {
     if (filters.value.author) params.append("author", filters.value.author);
 
     const response = await $fetch<BooksResponse>(
-      `${apiBase}/api/library/books?${params}`,
+      `${apiBase}/library/books?${params}`,
     );
 
     if (response.success) {
