@@ -40,11 +40,7 @@ export default defineNuxtConfig({
       ],
       link: [
         { rel: "icon", type: "image/x-icon", href: "/favicon.ico" },
-        { rel: "stylesheet", href: "/css/reset.css" },
-        { rel: "stylesheet", href: "/css/common.css" },
-        { rel: "stylesheet", href: "/css/layout.css" },
-        { rel: "stylesheet", href: "/css/slick.css" },
-        { rel: "stylesheet", href: "/css/swiper.css" },
+
         {
           rel: "stylesheet",
           href: "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css",
@@ -54,7 +50,12 @@ export default defineNuxtConfig({
     },
   },
 
-  css: ["~/assets/css/main.css"],
+  css: [
+    "~/assets/css/reset.css",
+    "~/assets/css/common.css",
+    "~/assets/css/layout.css",
+    "~/assets/css/main.css",
+  ],
 
   compatibilityDate: "2026-01-21",
 
