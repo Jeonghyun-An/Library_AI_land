@@ -593,80 +593,107 @@
                     <img src="/img/icon/ic_pdf.svg" alt="" />대한민국 헌법
                   </div>
                   <div class="pdf_view_con">
-                    <div class="pdf_view_inn">
-                      <!-- 한국 헌법 결과 -->
+                    <div class="pdf_view_inn" style="padding: 0">
+                      <!-- PDF 뷰어 (iframe) -->
+                      <iframe
+                        v-if="koreanPdfUrl"
+                        id="korean-pdf-viewer"
+                        :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(koreanPdfUrl)}#page=${koreanPdfPage}`"
+                        style="width: 100%; height: 600px; border: none"
+                        frameborder="0"
+                      ></iframe>
+
+                      <!-- 검색 결과 목록 (사이드바) -->
                       <div
-                        v-for="(result, idx) in koreanResults"
-                        :key="`kr-${idx}`"
                         style="
-                          margin-bottom: 20px;
-                          border: 1px solid #e5e7eb;
-                          border-radius: 8px;
-                          overflow: hidden;
+                          padding: 15px;
+                          border-top: 2px solid #e5e7eb;
+                          background: #f9fafb;
                         "
                       >
-                        <!-- PDF 페이지 이미지 -->
                         <div
-                          v-if="result.page"
                           style="
-                            background: #f9fafb;
-                            padding: 10px;
-                            border-bottom: 1px solid #e5e7eb;
+                            font-weight: bold;
+                            margin-bottom: 10px;
+                            color: #374151;
                           "
                         >
-                          <img
-                            :src="loadPdfImage(result)"
-                            alt="PDF 페이지"
-                            style="width: 100%; height: auto; display: block"
-                            @error="$event.target.style.display = 'none'"
-                          />
+                          검색 결과
                         </div>
-
-                        <!-- 조항 정보 -->
-                        <div style="padding: 15px">
+                        <div
+                          v-for="(result, idx) in koreanResults"
+                          :key="`kr-${idx}`"
+                          style="
+                            padding: 10px;
+                            margin-bottom: 8px;
+                            background: white;
+                            border: 1px solid #e5e7eb;
+                            border-radius: 6px;
+                            cursor: pointer;
+                          "
+                          :style="
+                            koreanPdfPage === result.page
+                              ? 'border-color: #2563eb; background: #eff6ff;'
+                              : ''
+                          "
+                          @click="loadKoreanPdf(result)"
+                        >
                           <div
                             style="
                               font-weight: bold;
                               color: #2563eb;
-                              margin-bottom: 8px;
+                              font-size: 0.9em;
+                              margin-bottom: 4px;
                             "
                           >
                             {{ result.structure.article_number || "조항" }}
                             <span
                               v-if="result.structure.chapter_title"
                               style="
-                                font-size: 0.9em;
+                                font-size: 0.85em;
                                 color: #666;
-                                margin-left: 8px;
+                                margin-left: 6px;
                               "
                             >
                               {{ result.structure.chapter_title }}
                             </span>
                           </div>
-                          <div style="line-height: 1.6; color: #374151">
+                          <div
+                            style="
+                              font-size: 0.85em;
+                              color: #6b7280;
+                              line-height: 1.4;
+                              display: -webkit-box;
+                              -webkit-line-clamp: 2;
+                              line-clamp: 2;
+                              -webkit-box-orient: vertical;
+                              overflow: hidden;
+                            "
+                          >
                             {{ result.korean_text || result.english_text }}
                           </div>
                           <div
                             style="
-                              margin-top: 8px;
-                              font-size: 0.85em;
-                              color: #6b7280;
+                              margin-top: 4px;
+                              font-size: 0.75em;
+                              color: #9ca3af;
                             "
                           >
                             유사도: {{ (result.score * 100).toFixed(1) }}% |
                             페이지: {{ result.page }}
                           </div>
                         </div>
-                      </div>
-                      <div
-                        v-if="koreanResults.length === 0"
-                        style="
-                          padding: 40px;
-                          text-align: center;
-                          color: #9ca3af;
-                        "
-                      >
-                        검색 결과가 없습니다.
+                        <div
+                          v-if="koreanResults.length === 0"
+                          style="
+                            padding: 20px;
+                            text-align: center;
+                            color: #9ca3af;
+                            font-size: 0.9em;
+                          "
+                        >
+                          검색 결과가 없습니다.
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -678,91 +705,117 @@
                     }})
                   </div>
                   <div class="pdf_view_con">
-                    <div class="pdf_view_inn">
-                      <!-- 외국 헌법 결과 -->
+                    <div class="pdf_view_inn" style="padding: 0">
+                      <!-- PDF 뷰어 (iframe) -->
+                      <iframe
+                        v-if="foreignPdfUrl"
+                        id="foreign-pdf-viewer"
+                        :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(foreignPdfUrl)}#page=${foreignPdfPage}`"
+                        style="width: 100%; height: 600px; border: none"
+                        frameborder="0"
+                      ></iframe>
+
+                      <!-- 검색 결과 목록 (사이드바) -->
                       <div
-                        v-for="(result, idx) in displayedForeignResults"
-                        :key="`foreign-${idx}`"
                         style="
-                          margin-bottom: 20px;
-                          border: 1px solid #e5e7eb;
-                          border-radius: 8px;
-                          overflow: hidden;
+                          padding: 15px;
+                          border-top: 2px solid #e5e7eb;
+                          background: #f9fafb;
                         "
                       >
-                        <!-- PDF 페이지 이미지 -->
                         <div
-                          v-if="result.page"
                           style="
-                            background: #f9fafb;
-                            padding: 10px;
-                            border-bottom: 1px solid #e5e7eb;
+                            font-weight: bold;
+                            margin-bottom: 10px;
+                            color: #374151;
                           "
                         >
-                          <img
-                            :src="loadPdfImage(result)"
-                            alt="PDF 페이지"
-                            style="width: 100%; height: auto; display: block"
-                            @error="$event.target.style.display = 'none'"
-                          />
+                          검색 결과
                         </div>
-
-                        <!-- 조항 정보 -->
-                        <div style="padding: 15px">
+                        <div
+                          v-for="(result, idx) in displayedForeignResults"
+                          :key="`foreign-${idx}`"
+                          style="
+                            padding: 10px;
+                            margin-bottom: 8px;
+                            background: white;
+                            border: 1px solid #e5e7eb;
+                            border-radius: 6px;
+                            cursor: pointer;
+                          "
+                          :style="
+                            foreignPdfPage === result.page
+                              ? 'border-color: #2563eb; background: #eff6ff;'
+                              : ''
+                          "
+                          @click="loadForeignPdf(result)"
+                        >
                           <div
                             style="
                               font-weight: bold;
                               color: #2563eb;
-                              margin-bottom: 8px;
+                              font-size: 0.9em;
+                              margin-bottom: 4px;
                             "
                           >
                             {{ result.structure.article_number || "Article" }}
                             <span
                               v-if="result.structure.chapter_title"
                               style="
-                                font-size: 0.9em;
+                                font-size: 0.85em;
                                 color: #666;
-                                margin-left: 8px;
+                                margin-left: 6px;
                               "
                             >
                               {{ result.structure.chapter_title }}
                             </span>
                           </div>
-                          <div style="line-height: 1.6">
+                          <div
+                            style="
+                              font-size: 0.85em;
+                              line-height: 1.4;
+                              display: -webkit-box;
+                              -webkit-line-clamp: 2;
+                              line-clamp: 2;
+                              -webkit-box-orient: vertical;
+                              overflow: hidden;
+                            "
+                          >
                             <div
                               v-if="result.has_korean"
-                              style="margin-bottom: 8px; color: #374151"
+                              style="color: #374151; margin-bottom: 4px"
                             >
                               {{ result.korean_text }}
                             </div>
                             <div
                               v-if="result.has_english"
-                              style="color: #6b7280; font-size: 0.95em"
+                              style="color: #6b7280"
                             >
                               {{ result.english_text }}
                             </div>
                           </div>
                           <div
                             style="
-                              margin-top: 8px;
-                              font-size: 0.85em;
-                              color: #6b7280;
+                              margin-top: 4px;
+                              font-size: 0.75em;
+                              color: #9ca3af;
                             "
                           >
                             유사도: {{ (result.score * 100).toFixed(1) }}% |
                             페이지: {{ result.page }}
                           </div>
                         </div>
-                      </div>
-                      <div
-                        v-if="displayedForeignResults.length === 0"
-                        style="
-                          padding: 40px;
-                          text-align: center;
-                          color: #9ca3af;
-                        "
-                      >
-                        국가를 선택하세요.
+                        <div
+                          v-if="displayedForeignResults.length === 0"
+                          style="
+                            padding: 20px;
+                            text-align: center;
+                            color: #9ca3af;
+                            font-size: 0.9em;
+                          "
+                        >
+                          국가를 선택하세요.
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -870,7 +923,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
 
 definePageMeta({
   layout: false,
@@ -895,7 +948,7 @@ useHead({
 });
 
 // ==================== API Composable 사용 ====================
-const { comparativeSearch, getPdfPageImage } = useConstitutionAPI();
+const { comparativeSearch, getPdfDownloadUrl } = useConstitutionAPI();
 
 // ==================== 상태 관리 ====================
 const searchQuery = ref("");
@@ -907,34 +960,72 @@ const searchHistory = ref([]);
 const selectedContinent = ref("korea"); // 기본값 변경
 const selectedForeignCountry = ref(null);
 
-// PDF 이미지 캐시
-const pdfImageCache = ref({});
+// PDF 뷰어 상태
+const koreanPdfUrl = ref(null);
+const foreignPdfUrl = ref(null);
+const koreanPdfPage = ref(1);
+const foreignPdfPage = ref(1);
 
-// ==================== PDF 이미지 로드 ====================
-async function loadPdfImage(result) {
-  // doc_id가 없으면 스킵
-  if (!result.structure?.doc_id && !result.country) {
-    return null;
+// ==================== PDF 로드 및 페이지 이동 ====================
+async function loadKoreanPdf(result) {
+  if (!result) return;
+
+  // doc_id 추출 시도 (여러 경로)
+  let docId =
+    result.structure?.doc_id || result.doc_id || result.metadata?.doc_id;
+
+  // doc_id가 없으면 국가 코드로 추정
+  if (!docId) {
+    const country = result.country || "KR";
+    const version = result.structure?.version || "latest";
+    docId = `${country}_${version}`;
+    console.warn(`한국 헌법 doc_id 추정: ${docId}`, result);
   }
 
-  // doc_id 생성 (metadata에서 가져오거나 추정)
-  const docId = result.structure?.doc_id || `${result.country}_latest`;
-  const page = result.page || 1;
-  const cacheKey = `${docId}_${page}`;
+  koreanPdfUrl.value = getPdfDownloadUrl(docId, true);
+  koreanPdfPage.value = result.page || 1;
 
-  // 캐시 확인
-  if (pdfImageCache.value[cacheKey]) {
-    return pdfImageCache.value[cacheKey];
+  await nextTick();
+  scrollToPdfPage("korean-pdf-viewer", result.page || 1);
+}
+
+async function loadForeignPdf(result) {
+  if (!result) return;
+
+  // 디버깅: result 전체 구조 확인
+  console.log("=== 외국 헌법 결과 전체 ===", JSON.stringify(result, null, 2));
+  console.log("result.doc_id:", result.doc_id);
+  console.log("result.structure:", result.structure);
+  console.log("result.metadata:", result.metadata);
+
+  // doc_id 추출 시도 (여러 경로)
+  let docId =
+    result.doc_id || result.structure?.doc_id || result.metadata?.doc_id;
+
+  // doc_id가 없으면 국가 코드로 추정
+  if (!docId) {
+    const country = result.country;
+    const version = result.structure?.version || "latest";
+    docId = `${country}_latest`;
+    console.warn(`외국 헌법 doc_id 추정: ${docId}`);
   }
 
-  try {
-    // PNG 이미지 URL 가져오기
-    const imageUrl = await getPdfPageImage(docId, page, "png", 150);
-    pdfImageCache.value[cacheKey] = imageUrl;
-    return imageUrl;
-  } catch (error) {
-    console.error(`PDF 이미지 로드 실패: ${docId} page ${page}`, error);
-    return null;
+  console.log("최종 doc_id:", docId);
+
+  foreignPdfUrl.value = getPdfDownloadUrl(docId, true);
+  foreignPdfPage.value = result.page || 1;
+
+  await nextTick();
+  scrollToPdfPage("foreign-pdf-viewer", result.page || 1);
+}
+
+function scrollToPdfPage(viewerId, pageNumber) {
+  // PDF.js iframe이 로드되면 페이지로 이동
+  const iframe = document.getElementById(viewerId);
+  if (iframe && iframe.contentWindow) {
+    // PDF.js URL에 #page= 파라미터 추가
+    const currentSrc = iframe.src.split("#")[0];
+    iframe.src = `${currentSrc}#page=${pageNumber}`;
   }
 }
 
@@ -1028,7 +1119,14 @@ const displayedForeignResults = computed(() => {
 
   const countryData =
     foreignResultsByCountry.value[selectedForeignCountry.value];
-  return countryData?.items || [];
+  const results = countryData?.items || [];
+
+  // 첫 번째 결과로 PDF 자동 로드
+  if (results.length > 0 && results[0]) {
+    loadForeignPdf(results[0]);
+  }
+
+  return results;
 });
 
 const selectedCountryName = computed(() => {
@@ -1051,7 +1149,7 @@ async function handleSearch() {
   isSearching.value = true;
 
   try {
-    // Composable 사용
+    // ✅ Composable 사용
     const response = await comparativeSearch({
       query: searchQuery.value,
       korean_top_k: 3,
@@ -1063,7 +1161,7 @@ async function handleSearch() {
     searchResult.value = response;
     addToHistory(searchQuery.value);
 
-    // 첫 번째 외국 국가 자동 선택
+    // ✅ 첫 번째 외국 국가 자동 선택
     if (foreignCountries.value.length > 0) {
       const firstCountry = foreignCountries.value[0];
       selectedForeignCountry.value = firstCountry.code;
