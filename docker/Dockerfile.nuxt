@@ -16,6 +16,9 @@ COPY frontend/ ./
 # 빌드
 RUN npm run build
 
+# sanity check
+RUN test -f /app/.output/server/index.mjs
+
 # Production 이미지
 FROM node:20-alpine
 
