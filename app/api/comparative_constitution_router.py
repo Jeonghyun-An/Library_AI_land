@@ -1379,13 +1379,16 @@ async def _search_korean_constitution(
         for hit in hits:
             meta_raw = _hit_field(hit, "metadata", {})
             meta = _ensure_meta_dict(meta_raw)
-
+            doc_id = meta.get('doc_id') or meta.get('constitution_doc_id')
             result = ConstitutionArticleResult(
                 country=meta.get('country', 'KR'),
                 country_name=meta.get('country_name', '대한민국'),
                 constitution_title=meta.get('constitution_title', '대한민국헌법'),
                 display_path=meta.get('display_path', ''),
-                structure=meta.get('structure', {}) if isinstance(meta.get('structure', {}), dict) else {},
+                structure={
+                    **(meta.get('structure', {}) if isinstance(meta.get('structure', {}), dict) else {}),
+                    'doc_id': doc_id
+                },
                 english_text=meta.get('english_text'),
                 korean_text=meta.get('korean_text'),
                 text_type=meta.get('text_type', 'korean_only'),
@@ -1433,6 +1436,7 @@ async def _search_foreign_candidate_pool(
         for hit in hits:
             meta_raw = _hit_field(hit, "metadata", {})
             meta = _ensure_meta_dict(meta_raw)
+            doc_id = meta.get('doc_id') or meta.get('constitution_doc_id')
 
             results.append(
                 ConstitutionArticleResult(
@@ -1440,7 +1444,10 @@ async def _search_foreign_candidate_pool(
                     country_name=meta.get("country_name"),
                     constitution_title=meta.get("constitution_title"),
                     display_path=meta.get("display_path"),
-                    structure=meta.get("structure", {}) if isinstance(meta.get("structure", {}), dict) else {},
+                    structure={
+                    **(meta.get('structure', {}) if isinstance(meta.get('structure', {}), dict) else {}),
+                    'doc_id': doc_id
+                    },
                     english_text=meta.get("english_text"),
                     korean_text=meta.get("korean_text"),
                     text_type=meta.get("text_type"),
