@@ -924,7 +924,16 @@ const koreanResults = computed(() => {
   if (!searchResult.value?.pairs || searchResult.value.pairs.length === 0) {
     return [];
   }
-  return [searchResult.value.pairs[0].korean];
+  const results = [searchResult.value.pairs[0].korean];
+
+  // 첫 번째 결과 자동 로드
+  if (results.length > 0 && results[0]) {
+    nextTick(() => {
+      loadKoreanPdf(results[0]);
+    });
+  }
+
+  return results;
 });
 
 const foreignResultsByCountry = computed(() => {
@@ -934,19 +943,18 @@ const foreignResultsByCountry = computed(() => {
 
   const allForeign = {};
 
-  searchResult.value.pairs.forEach((pair) => {
-    const foreignBlock = pair.foreign || {};
+  // pairs[0]만 사용 (첫 번째 한국 조항에 매칭된 외국 조항들)
+  const firstPair = searchResult.value.pairs[0];
+  const foreignBlock = firstPair.foreign || {};
 
-    for (const [countryCode, countryData] of Object.entries(foreignBlock)) {
-      if (!allForeign[countryCode]) {
-        allForeign[countryCode] = {
-          items: [],
-          next_cursor: countryData.next_cursor,
-        };
-      }
-      allForeign[countryCode].items.push(...(countryData.items || []));
+  for (const [countryCode, countryData] of Object.entries(foreignBlock)) {
+    if (!allForeign[countryCode]) {
+      allForeign[countryCode] = {
+        items: countryData.items || [],
+        next_cursor: countryData.next_cursor,
+      };
     }
-  });
+  }
 
   return allForeign;
 });
@@ -998,7 +1006,9 @@ const displayedForeignResults = computed(() => {
   const results = countryData?.items || [];
 
   if (results.length > 0 && results[0]) {
-    loadForeignPdf(results[0]);
+    nextTick(() => {
+      loadForeignPdf(results[0]);
+    });
   }
 
   return results;
