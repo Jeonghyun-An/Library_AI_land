@@ -924,9 +924,10 @@ const koreanResults = computed(() => {
   if (!searchResult.value?.pairs || searchResult.value.pairs.length === 0) {
     return [];
   }
-  const results = [searchResult.value.pairs[0].korean];
 
-  // 첫 번째 결과 자동 로드
+  // 모든 pairs에서 korean 결과 추출
+  const results = searchResult.value.pairs.map((pair) => pair.korean);
+
   if (results.length > 0 && results[0]) {
     nextTick(() => {
       loadKoreanPdf(results[0]);
