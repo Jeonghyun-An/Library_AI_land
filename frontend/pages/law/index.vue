@@ -19,12 +19,12 @@
       </div>
       <div class="left_menu_con_wrap view_ctr">
         <div class="left_menu_con">
-          <!-- [S] 스크롤되는 영역 -->
+          <!-- [S] 스크롤되는 영역 - 질의 히스토리만 세로 스크롤 -->
           <div class="tab_con_wrap">
             <!-- [S] 질의 히스토리 -->
             <div class="tab_history tab_con on">
               <div class="con_tit ty_01 mt_20i">질의 히스토리</div>
-              <div class="history_con_wrap">
+              <div class="history_con_wrap history_con_wrap--scrollable">
                 <div class="history_con">
                   <!-- 동적 히스토리 -->
                   <template v-if="searchHistory.length > 0">
@@ -41,7 +41,10 @@
                             class="history_con_inn"
                             @click.prevent="loadHistoryQuery(item)"
                           >
-                            <div class="txt" v-html="item.query"></div>
+                            <div
+                              class="txt ellipsis line02"
+                              v-html="item.query"
+                            ></div>
                             <button
                               class="ic_del"
                               aria-label="삭제"
@@ -59,9 +62,8 @@
                     <ul class="history_con_list">
                       <li class="history_con_item">
                         <a href="#;" class="history_con_inn">
-                          <div class="txt">
-                            인간의 존엄성과 관련된 각 국의<br />
-                            헌법 조항 알려줘.
+                          <div class="txt ellipsis line02">
+                            인간의 존엄성과 관련된 각 국의 헌법 조항 알려줘.
                           </div>
                           <button
                             class="ic_del"
@@ -72,8 +74,8 @@
                       </li>
                       <li class="history_con_item">
                         <a href="#;" class="history_con_inn">
-                          <div class="txt">
-                            주요 국가 헌법 '표현의 자유' 조항 비교 해줘.<br />
+                          <div class="txt ellipsis line02">
+                            주요 국가 헌법 '표현의 자유' 조항 비교 해줘.
                             (한국·미국·독일·일본 중심)
                           </div>
                           <button
@@ -85,7 +87,7 @@
                       </li>
                       <li class="history_con_item">
                         <a href="#;" class="history_con_inn">
-                          <div class="txt">
+                          <div class="txt ellipsis line02">
                             주요 국가 헌법 비상사태 조항 비교 해줘.
                           </div>
                           <button
@@ -586,236 +588,124 @@
                 </div>
               </div>
 
-              <!-- PDF 뷰어 (좌우 비교) -->
+              <!-- ========== PDF 뷰어 (좌우 비교) - 좌우 분할 구조 ========== -->
               <div class="pdf_view_wrap">
+                <!-- 한국 헌법 -->
                 <div class="half">
                   <div class="pdf_view_tit">
                     <img src="/img/icon/ic_pdf.svg" alt="" />대한민국 헌법
                   </div>
-                  <div class="pdf_view_con">
-                    <div class="pdf_view_inn" style="padding: 0">
-                      <!-- PDF 뷰어 (iframe) -->
+                  <div class="pdf_view_container">
+                    <!-- 좌측 2/3: PDF 뷰어 -->
+                    <div class="pdf_viewer_area">
                       <iframe
                         v-if="koreanPdfUrl"
                         id="korean-pdf-viewer"
                         :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(koreanPdfUrl)}#page=${koreanPdfPage}`"
-                        style="width: 100%; height: 600px; border: none"
+                        class="pdf_iframe"
                         frameborder="0"
                       ></iframe>
+                    </div>
 
-                      <!-- 검색 결과 목록 (사이드바) -->
+                    <!-- 우측 1/3: 검색 결과 목록 (독립 스크롤) -->
+                    <div class="pdf_results_area">
+                      <div class="pdf_results_title">검색 결과</div>
                       <div
-                        style="
-                          padding: 15px;
-                          border-top: 2px solid #e5e7eb;
-                          background: #f9fafb;
-                        "
+                        v-for="(result, idx) in koreanResults"
+                        :key="`kr-${idx}`"
+                        class="pdf_result_item"
+                        :class="{ active: koreanPdfPage === result.page }"
+                        @click="loadKoreanPdf(result)"
                       >
-                        <div
-                          style="
-                            font-weight: bold;
-                            margin-bottom: 10px;
-                            color: #374151;
-                          "
-                        >
-                          검색 결과
-                        </div>
-                        <div
-                          v-for="(result, idx) in koreanResults"
-                          :key="`kr-${idx}`"
-                          style="
-                            padding: 10px;
-                            margin-bottom: 8px;
-                            background: white;
-                            border: 1px solid #e5e7eb;
-                            border-radius: 6px;
-                            cursor: pointer;
-                          "
-                          :style="
-                            koreanPdfPage === result.page
-                              ? 'border-color: #2563eb; background: #eff6ff;'
-                              : ''
-                          "
-                          @click="loadKoreanPdf(result)"
-                        >
-                          <div
-                            style="
-                              font-weight: bold;
-                              color: #2563eb;
-                              font-size: 0.9em;
-                              margin-bottom: 4px;
-                            "
+                        <div class="result_article">
+                          {{ result.structure.article_number || "조항" }}
+                          <span
+                            v-if="result.structure.chapter_title"
+                            class="result_chapter"
                           >
-                            {{ result.structure.article_number || "조항" }}
-                            <span
-                              v-if="result.structure.chapter_title"
-                              style="
-                                font-size: 0.85em;
-                                color: #666;
-                                margin-left: 6px;
-                              "
-                            >
-                              {{ result.structure.chapter_title }}
-                            </span>
-                          </div>
-                          <div
-                            style="
-                              font-size: 0.85em;
-                              color: #6b7280;
-                              line-height: 1.4;
-                              display: -webkit-box;
-                              -webkit-line-clamp: 2;
-                              line-clamp: 2;
-                              -webkit-box-orient: vertical;
-                              overflow: hidden;
-                            "
-                          >
-                            {{ result.korean_text || result.english_text }}
-                          </div>
-                          <div
-                            style="
-                              margin-top: 4px;
-                              font-size: 0.75em;
-                              color: #9ca3af;
-                            "
-                          >
-                            유사도: {{ (result.score * 100).toFixed(1) }}% |
-                            페이지: {{ result.page }}
-                          </div>
+                            {{ result.structure.chapter_title }}
+                          </span>
                         </div>
-                        <div
-                          v-if="koreanResults.length === 0"
-                          style="
-                            padding: 20px;
-                            text-align: center;
-                            color: #9ca3af;
-                            font-size: 0.9em;
-                          "
-                        >
-                          검색 결과가 없습니다.
+                        <div class="result_text ellipsis line02">
+                          {{ result.korean_text || result.english_text }}
                         </div>
+                        <div class="result_meta">
+                          유사도: {{ (result.score * 100).toFixed(1) }}% |
+                          페이지: {{ result.page }}
+                        </div>
+                      </div>
+                      <div
+                        v-if="koreanResults.length === 0"
+                        class="pdf_results_empty"
+                      >
+                        검색 결과가 없습니다.
                       </div>
                     </div>
                   </div>
                 </div>
+
+                <!-- 외국 헌법 -->
                 <div class="half">
                   <div class="pdf_view_tit">
                     <img src="/img/icon/ic_pdf.svg" alt="" />나라별 헌법({{
                       selectedCountryName
                     }})
                   </div>
-                  <div class="pdf_view_con">
-                    <div class="pdf_view_inn" style="padding: 0">
-                      <!-- PDF 뷰어 (iframe) -->
+                  <div class="pdf_view_container">
+                    <!-- 좌측 2/3: PDF 뷰어 -->
+                    <div class="pdf_viewer_area">
                       <iframe
                         v-if="foreignPdfUrl"
                         id="foreign-pdf-viewer"
                         :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(foreignPdfUrl)}#page=${foreignPdfPage}`"
-                        style="width: 100%; height: 600px; border: none"
+                        class="pdf_iframe"
                         frameborder="0"
                       ></iframe>
+                    </div>
 
-                      <!-- 검색 결과 목록 (사이드바) -->
+                    <!-- 우측 1/3: 검색 결과 목록 (독립 스크롤) -->
+                    <div class="pdf_results_area">
+                      <div class="pdf_results_title">검색 결과</div>
                       <div
-                        style="
-                          padding: 15px;
-                          border-top: 2px solid #e5e7eb;
-                          background: #f9fafb;
-                        "
+                        v-for="(result, idx) in displayedForeignResults"
+                        :key="`foreign-${idx}`"
+                        class="pdf_result_item"
+                        :class="{ active: foreignPdfPage === result.page }"
+                        @click="loadForeignPdf(result)"
                       >
-                        <div
-                          style="
-                            font-weight: bold;
-                            margin-bottom: 10px;
-                            color: #374151;
-                          "
-                        >
-                          검색 결과
-                        </div>
-                        <div
-                          v-for="(result, idx) in displayedForeignResults"
-                          :key="`foreign-${idx}`"
-                          style="
-                            padding: 10px;
-                            margin-bottom: 8px;
-                            background: white;
-                            border: 1px solid #e5e7eb;
-                            border-radius: 6px;
-                            cursor: pointer;
-                          "
-                          :style="
-                            foreignPdfPage === result.page
-                              ? 'border-color: #2563eb; background: #eff6ff;'
-                              : ''
-                          "
-                          @click="loadForeignPdf(result)"
-                        >
-                          <div
-                            style="
-                              font-weight: bold;
-                              color: #2563eb;
-                              font-size: 0.9em;
-                              margin-bottom: 4px;
-                            "
+                        <div class="result_article">
+                          {{ result.structure.article_number || "Article" }}
+                          <span
+                            v-if="result.structure.chapter_title"
+                            class="result_chapter"
                           >
-                            {{ result.structure.article_number || "Article" }}
-                            <span
-                              v-if="result.structure.chapter_title"
-                              style="
-                                font-size: 0.85em;
-                                color: #666;
-                                margin-left: 6px;
-                              "
-                            >
-                              {{ result.structure.chapter_title }}
-                            </span>
+                            {{ result.structure.chapter_title }}
+                          </span>
+                        </div>
+                        <div class="result_text">
+                          <div
+                            v-if="result.has_korean"
+                            class="result_text_ko ellipsis line02"
+                          >
+                            {{ result.korean_text }}
                           </div>
                           <div
-                            style="
-                              font-size: 0.85em;
-                              line-height: 1.4;
-                              display: -webkit-box;
-                              -webkit-line-clamp: 2;
-                              line-clamp: 2;
-                              -webkit-box-orient: vertical;
-                              overflow: hidden;
-                            "
+                            v-if="result.has_english"
+                            class="result_text_en ellipsis line02"
                           >
-                            <div
-                              v-if="result.has_korean"
-                              style="color: #374151; margin-bottom: 4px"
-                            >
-                              {{ result.korean_text }}
-                            </div>
-                            <div
-                              v-if="result.has_english"
-                              style="color: #6b7280"
-                            >
-                              {{ result.english_text }}
-                            </div>
-                          </div>
-                          <div
-                            style="
-                              margin-top: 4px;
-                              font-size: 0.75em;
-                              color: #9ca3af;
-                            "
-                          >
-                            유사도: {{ (result.score * 100).toFixed(1) }}% |
-                            페이지: {{ result.page }}
+                            {{ result.english_text }}
                           </div>
                         </div>
-                        <div
-                          v-if="displayedForeignResults.length === 0"
-                          style="
-                            padding: 20px;
-                            text-align: center;
-                            color: #9ca3af;
-                            font-size: 0.9em;
-                          "
-                        >
-                          국가를 선택하세요.
+                        <div class="result_meta">
+                          유사도: {{ (result.score * 100).toFixed(1) }}% |
+                          페이지: {{ result.page }}
                         </div>
+                      </div>
+                      <div
+                        v-if="displayedForeignResults.length === 0"
+                        class="pdf_results_empty"
+                      >
+                        국가를 선택하세요.
                       </div>
                     </div>
                   </div>
@@ -957,7 +847,7 @@ const hasSearched = ref(false);
 const isSearching = ref(false);
 const searchResult = ref(null);
 const searchHistory = ref([]);
-const selectedContinent = ref("korea"); // 기본값 변경
+const selectedContinent = ref("korea");
 const selectedForeignCountry = ref(null);
 
 // PDF 뷰어 상태
@@ -970,11 +860,9 @@ const foreignPdfPage = ref(1);
 async function loadKoreanPdf(result) {
   if (!result) return;
 
-  // doc_id 추출 시도 (여러 경로)
   let docId =
     result.structure?.doc_id || result.doc_id || result.metadata?.doc_id;
 
-  // doc_id가 없으면 국가 코드로 추정
   if (!docId) {
     const country = result.country || "KR";
     const version = result.structure?.version || "latest";
@@ -992,17 +880,11 @@ async function loadKoreanPdf(result) {
 async function loadForeignPdf(result) {
   if (!result) return;
 
-  // 디버깅: result 전체 구조 확인
   console.log("=== 외국 헌법 결과 전체 ===", JSON.stringify(result, null, 2));
-  console.log("result.doc_id:", result.doc_id);
-  console.log("result.structure:", result.structure);
-  console.log("result.metadata:", result.metadata);
 
-  // doc_id 추출 시도 (여러 경로)
   let docId =
     result.doc_id || result.structure?.doc_id || result.metadata?.doc_id;
 
-  // doc_id가 없으면 국가 코드로 추정
   if (!docId) {
     const country = result.country;
     const version = result.structure?.version || "latest";
@@ -1020,10 +902,8 @@ async function loadForeignPdf(result) {
 }
 
 function scrollToPdfPage(viewerId, pageNumber) {
-  // PDF.js iframe이 로드되면 페이지로 이동
   const iframe = document.getElementById(viewerId);
   if (iframe && iframe.contentWindow) {
-    // PDF.js URL에 #page= 파라미터 추가
     const currentSrc = iframe.src.split("#")[0];
     iframe.src = `${currentSrc}#page=${pageNumber}`;
   }
@@ -1044,11 +924,9 @@ const koreanResults = computed(() => {
   if (!searchResult.value?.pairs || searchResult.value.pairs.length === 0) {
     return [];
   }
-  // pairs[0].korean = 한국 조항
   return [searchResult.value.pairs[0].korean];
 });
 
-// 외국 결과: pairs[0].foreign = { "GH": { items: [...] }, "NG": { items: [...] } }
 const foreignResultsByCountry = computed(() => {
   if (!searchResult.value?.pairs || searchResult.value.pairs.length === 0) {
     return {};
@@ -1092,7 +970,6 @@ const foreignCountries = computed(() => {
   return countries;
 });
 
-// 대륙별 국가 그룹핑
 const continentsWithCountries = computed(() => {
   const continents = {};
 
@@ -1107,7 +984,6 @@ const continentsWithCountries = computed(() => {
   return continents;
 });
 
-// 검색 결과가 있는 대륙만
 const availableContinents = computed(() => {
   return Object.keys(continentsWithCountries.value);
 });
@@ -1121,7 +997,6 @@ const displayedForeignResults = computed(() => {
     foreignResultsByCountry.value[selectedForeignCountry.value];
   const results = countryData?.items || [];
 
-  // 첫 번째 결과로 PDF 자동 로드
   if (results.length > 0 && results[0]) {
     loadForeignPdf(results[0]);
   }
@@ -1149,7 +1024,6 @@ async function handleSearch() {
   isSearching.value = true;
 
   try {
-    // ✅ Composable 사용
     const response = await comparativeSearch({
       query: searchQuery.value,
       korean_top_k: 3,
@@ -1161,13 +1035,11 @@ async function handleSearch() {
     searchResult.value = response;
     addToHistory(searchQuery.value);
 
-    // ✅ 첫 번째 외국 국가 자동 선택
     if (foreignCountries.value.length > 0) {
       const firstCountry = foreignCountries.value[0];
       selectedForeignCountry.value = firstCountry.code;
       selectedContinent.value = firstCountry.continent;
     } else {
-      // 외국 결과 없으면 한국 탭으로
       selectedContinent.value = "korea";
       selectedForeignCountry.value = null;
     }
@@ -1580,3 +1452,210 @@ onBeforeUnmount(() => {
   }
 });
 </script>
+
+<style scoped>
+/* ==================== 질의 히스토리 스크롤 강화 ==================== */
+.history_con_wrap--scrollable {
+  max-height: calc(100vh - 270px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 질의 히스토리 스크롤바 스타일 (기존 CSS 스타일 일치) */
+.history_con_wrap--scrollable::-webkit-scrollbar {
+  width: 5px;
+}
+
+.history_con_wrap--scrollable::-webkit-scrollbar-track {
+  background: #ffffff;
+}
+
+.history_con_wrap--scrollable::-webkit-scrollbar-thumb {
+  background: #004e97;
+  border-radius: 5px;
+}
+
+/* Firefox */
+.history_con_wrap--scrollable {
+  scrollbar-width: thin;
+  scrollbar-color: #004e97 #ffffff;
+}
+
+/* 질의 히스토리 아이템 내 텍스트 영역 오버플로우 방지 */
+.history_con_inn {
+  overflow: hidden;
+}
+
+.history_con_inn .txt {
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* ==================== PDF 뷰어 컨테이너 (좌우 분할) ==================== */
+.pdf_view_container {
+  width: 100%;
+  height: 800px;
+  display: flex;
+  flex-direction: row;
+  background: var(--white);
+  border-radius: 0.375rem;
+  overflow: hidden;
+}
+
+/* PDF 뷰어 영역 (좌측 2/3) */
+.pdf_viewer_area {
+  width: 66.666%;
+  height: 100%;
+  flex-shrink: 0;
+  background: #2c2c2c;
+  border-right: 2px solid #e5e7eb;
+}
+
+.pdf_iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}
+
+/* 검색 결과 영역 (우측 1/3, 독립 스크롤) */
+.pdf_results_area {
+  width: 33.333%;
+  height: 100%;
+  flex-shrink: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 1rem;
+  background: #f9fafb;
+}
+
+/* 검색 결과 스크롤바 (기존 CSS 스타일 일치) */
+.pdf_results_area::-webkit-scrollbar {
+  width: 5px;
+}
+
+.pdf_results_area::-webkit-scrollbar-track {
+  background: #ffffff;
+}
+
+.pdf_results_area::-webkit-scrollbar-thumb {
+  background: #004e97;
+  border-radius: 5px;
+}
+
+/* Firefox */
+.pdf_results_area {
+  scrollbar-width: thin;
+  scrollbar-color: #004e97 #ffffff;
+}
+
+/* 검색 결과 제목 */
+.pdf_results_title {
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: #374151;
+  font-size: 0.8rem;
+}
+
+/* 검색 결과 아이템 */
+.pdf_result_item {
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--white);
+  border: 1px solid #e5e7eb;
+  border-radius: 0.375rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pdf_result_item:hover {
+  border-color: var(--primary);
+  background: var(--primary5);
+}
+
+.pdf_result_item.active {
+  border-color: var(--primary);
+  background: var(--primary10);
+}
+
+/* 조항 번호 */
+.result_article {
+  font-weight: 600;
+  color: var(--primary);
+  font-size: 0.8rem;
+  margin-bottom: 0.375rem;
+}
+
+.result_chapter {
+  font-size: 0.7rem;
+  color: #666;
+  margin-left: 0.5rem;
+  font-weight: 400;
+}
+
+/* 결과 텍스트 */
+.result_text {
+  font-size: 0.7rem;
+  color: #333;
+  line-height: 1.5;
+  margin-bottom: 0.375rem;
+}
+
+.result_text_ko {
+  color: #374151;
+  margin-bottom: 0.25rem;
+}
+
+.result_text_en {
+  color: #6b7280;
+}
+
+/* 메타 정보 */
+.result_meta {
+  margin-top: 0.375rem;
+  font-size: 0.65rem;
+  color: #9ca3af;
+}
+
+/* 빈 결과 메시지 */
+.pdf_results_empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 0.8rem;
+}
+
+/* ==================== 반응형 (모바일) ==================== */
+@media (max-width: 1024px) {
+  .pdf_view_container {
+    height: 600px;
+  }
+
+  .history_con_wrap--scrollable {
+    max-height: calc(100vh - 250px);
+  }
+}
+
+@media (max-width: 640px) {
+  .pdf_view_wrap {
+    flex-direction: column;
+  }
+
+  .pdf_view_container {
+    height: 500px;
+    flex-direction: column;
+  }
+
+  .pdf_viewer_area {
+    width: 100%;
+    height: 60%;
+    border-right: none;
+    border-bottom: 2px solid #e5e7eb;
+  }
+
+  .pdf_results_area {
+    width: 100%;
+    height: 40%;
+  }
+}
+</style>
