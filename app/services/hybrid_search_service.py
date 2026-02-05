@@ -1,40 +1,37 @@
 # app/services/hybrid_search_service.py
 """
-하이브리드 검색 서비스 (FULL PATCH)
+하이브리드 검색 서비스 (FULL PATCH v2.0)
 - Dense(벡터) + Sparse(BM25-like rank) + Keyword(조항번호) → RRF Fusion
-- BM25 raw score 제거 → rank-only signal (Sparse 영향 과대 방지)
-- reranker 이후 score_threshold 적용 (정확한 필터링)
-- display_score(0~1) 분리 (프론트 % 폭주 방지)
-- Sparse corpus 범위 제한(expr) + doc_type 필터 기본 적용 (노이즈/비용 절감)
-- match_foreign_to_korean() 포함 (한국 클릭 → 외국 재매칭에 사용 가능)
+- 점수 정규화: raw_score(원본) → score(실제 사용) → display_score(0~1 정규화)
+- reranker 이후 score_threshold 적용
+- Sparse corpus 범위 제한 + doc_type 필터
 """
 
 from __future__ import annotations
 
+import os
 import re
+import math
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 
 
 # =========================
-# Sparse (rank-only)
+# Sparse (rank-only BM25)
 # =========================
 class BM25RankOnly:
     """
-    '진짜 BM25' 대신:
-    - 구현/비용 단순화
-    - raw score 폭주 제거
-    - rank-only signal로 RRF에 안정적으로 반영
-
-    현재는 "쿼리 토큰과 문서 토큰의 overlap" 기반으로 순위만 만들고,
-    점수는 순위 기반(1/(rank+1))으로만 부여한다.
+    BM25 rank-only implementation
+    - raw score 폭주 방지
+    - 순위 기반으로만 RRF에 반영
     """
 
     def fit(self, corpus: List[str]):
-        # fit 유지(확장 여지), 현재는 필요 없음
+        # 확장 여지를 위한 메서드 (현재는 사용 안함)
         return
 
     def rank(self, query: str, corpus: List[str]) -> List[int]:
+        """쿼리와 문서의 단어 overlap 기반 순위"""
         q_terms = set(query.lower().split())
         scored = []
         for idx, text in enumerate(corpus):
@@ -49,14 +46,17 @@ class BM25RankOnly:
 # Utils
 # =========================
 def extract_article_numbers(query: str) -> List[str]:
+    """조항 번호 추출 (한국어/영어)"""
     nums: List[str] = []
+    # 한국어: 제57조, 제 10 조
     nums += re.findall(r"제\s*(\d+)\s*조", query)
+    # 영어: Article 57, Article (10)
     nums += re.findall(r"Article\s*\(?\s*(\d+)\s*\)?", query, re.IGNORECASE)
-    # unique
-    return list(set(nums))
+    return list(set(nums))  # 중복 제거
 
 
 def clamp01(x: float) -> float:
+    """0~1 범위로 제한"""
     try:
         x = float(x)
     except Exception:
@@ -64,13 +64,43 @@ def clamp01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
+def normalize_scores_minmax(scores: List[float]) -> List[float]:
+    """Min-Max 정규화"""
+    if not scores or len(scores) == 0:
+        return []
+    
+    min_s = min(scores)
+    max_s = max(scores)
+    
+    if max_s - min_s < 1e-9:
+        # 모든 점수가 같으면 모두 1.0
+        return [1.0] * len(scores)
+    
+    return [(s - min_s) / (max_s - min_s) for s in scores]
+
+
+def normalize_scores_sigmoid(scores: List[float], scale: float = 1.0) -> List[float]:
+    """Sigmoid 정규화 (0~1)"""
+    if not scores:
+        return []
+    
+    result = []
+    for s in scores:
+        try:
+            sig = 1.0 / (1.0 + math.exp(-s * scale))
+            result.append(sig)
+        except (OverflowError, ZeroDivisionError):
+            result.append(0.5)
+    
+    return result
+
+
 def _ensure_meta_dict(meta: Any) -> Dict[str, Any]:
-    # router 쪽에도 비슷한 함수가 있지만, 서비스 단에서 안전장치
+    """메타데이터를 dict로 변환"""
     if meta is None:
         return {}
     if isinstance(meta, dict):
         return meta
-    # 문자열 JSON이면 라우터에서 풀어주기도 하지만 여기서도 시도해둠
     if isinstance(meta, str):
         try:
             import json
@@ -86,10 +116,7 @@ def _ensure_meta_dict(meta: Any) -> Dict[str, Any]:
 
 def _hit_field(hit: Any, field: str, default=None):
     """
-    PyMilvus hit/entity 접근 호환:
-    - hit.entity 가 dict 인 경우
-    - hit.entity 가 Entity 객체인 경우
-    - hit 자체가 dict-like 인 경우
+    PyMilvus hit/entity 접근 호환 함수
     """
     ent = getattr(hit, "entity", None)
     if ent is not None:
@@ -127,11 +154,22 @@ def rrf_fusion(
     k: int = 60,
 ) -> List[Dict[str, Any]]:
     """
-    RRF(Reciprocal Rank Fusion):
+    RRF(Reciprocal Rank Fusion)
     score = Σ weight * 1/(k + rank)
-
-    - raw score를 섞지 않아서 점수 폭주/스케일 문제 없음
+    
+    Args:
+        dense_results: 벡터 검색 결과
+        sparse_results: BM25 검색 결과
+        keyword_results: 키워드(조항번호) 검색 결과
+        dense_weight: 벡터 가중치
+        sparse_weight: BM25 가중치
+        keyword_weight: 키워드 가중치
+        k: RRF constant (default: 60)
+    
+    Returns:
+        Fused results with fusion_score
     """
+    # 가중치 정규화
     total = dense_weight + sparse_weight + keyword_weight
     if total <= 0:
         dense_weight, sparse_weight, keyword_weight = 1.0, 0.0, 0.0
@@ -147,6 +185,7 @@ def rrf_fusion(
         cid = result.get("chunk_id") or result.get("doc_id")
         if not cid:
             return
+        
         rrf_score = weight * (1.0 / (k + rank + 1))
 
         if cid not in fused:
@@ -161,12 +200,15 @@ def rrf_fusion(
         fused[cid]["fusion_score"] += rrf_score
         fused[cid][rank_key] = rank + 1
 
+    # Dense 추가
     for r, res in enumerate(dense_results or []):
         _add(r, res, dense_weight, "dense_rank")
 
+    # Sparse 추가
     for r, res in enumerate(sparse_results or []):
         _add(r, res, sparse_weight, "sparse_rank")
 
+    # Keyword 추가
     for r, res in enumerate(keyword_results or []):
         _add(r, res, keyword_weight, "keyword_rank")
 
@@ -193,15 +235,32 @@ def hybrid_search(
     keyword_weight: float = 0.2,
 ) -> List[Dict[str, Any]]:
     """
-    하이브리드 검색
-
-    핵심 포인트:
-    - Sparse는 raw score를 쓰지 않고 rank-only signal로만 반영
-    - 최종 필터(score_threshold)는 reranker 이후 적용
-    - 프론트 표기용 display_score(0~1)를 별도로 제공
+    하이브리드 검색 메인 함수
+    
+    점수 체계:
+    - raw_score: 원본 점수 (fusion_score or re_score)
+    - score: 실제 사용 점수 (raw_score와 동일하지만 명시적)
+    - display_score: 프론트엔드 표시용 (0~1 정규화)
+    
+    Args:
+        query: 검색 쿼리
+        collection: Milvus collection
+        embedding_model: 임베딩 모델
+        top_k: 반환할 결과 수
+        initial_retrieve: 초기 검색 개수
+        country_filter: 국가 필터 (예: "KR", "US")
+        use_reranker: reranker 사용 여부
+        score_threshold: 최소 점수 (reranker 이후 적용)
+        min_results: 최소 결과 개수
+        doc_type_filter: 문서 타입 필터
+        sparse_corpus_limit: Sparse 검색 corpus 제한
+        dense_weight, sparse_weight, keyword_weight: 각 검색 방식 가중치
+    
+    Returns:
+        검색 결과 리스트 (각 항목은 raw_score, score, display_score 포함)
     """
 
-    # ---------- expr 구성 ----------
+    # ---------- 필터 expr 구성 ----------
     expr_parts: List[str] = []
     if doc_type_filter:
         expr_parts.append(f'metadata["doc_type"] == "{doc_type_filter}"')
@@ -210,70 +269,87 @@ def hybrid_search(
 
     expr = " && ".join(expr_parts) if expr_parts else None
 
-    # ---------- Dense ----------
+    # ---------- Dense (벡터 검색) ----------
     q_emb = embedding_model.encode([query], normalize_embeddings=True)[0]
-    dense_hits = collection.search(
-        data=[q_emb.tolist()],
-        anns_field="embedding",
-        param={"metric_type": "IP", "params": {"ef": 256}},
-        limit=initial_retrieve,
-        expr=expr,
-        output_fields=["doc_id", "chunk_text", "metadata"],
-    )
 
-    dense: List[Dict[str, Any]] = []
-    for hits in dense_hits:
-        for r, h in enumerate(hits):
-            dense.append(
-                {
-                    "chunk_id": _hit_field(h, "doc_id"),
-                    "chunk": _hit_field(h, "chunk_text"),
-                    "score": float(getattr(h, "score", 0.0) or 0.0),  # 내부 참고용
-                    "metadata": _hit_field(h, "metadata"),
-                    "rank": r + 1,
-                }
-            )
+    METRIC = os.getenv("MILVUS_METRIC_TYPE", "IP")
 
-    # ---------- Sparse (rank-only) ----------
-    sparse: List[Dict[str, Any]] = []
     try:
-        corpus_docs = collection.query(
-            expr=expr or "id >= 0",
+        dense_hits = collection.search(
+            data=[q_emb.tolist()],
+            anns_field="embedding",
+            param={"metric_type": METRIC, "params": {"ef": 64}},
+            limit=initial_retrieve,
+            expr=expr,
             output_fields=["doc_id", "chunk_text", "metadata"],
-            limit=min(sparse_corpus_limit, max(initial_retrieve * 3, 200)),
         )
-    except Exception:
-        corpus_docs = []
+    except Exception as e:
+        print(f"[HYBRID] Dense search error: {e}")
+        dense_hits = [[]]
 
-    if corpus_docs:
-        corpus = [d.get("chunk_text", "") for d in corpus_docs]
-        bm25 = BM25RankOnly()
-        bm25.fit(corpus)
 
-        ranked_idx = bm25.rank(query, corpus)[:initial_retrieve]
-        for r, idx in enumerate(ranked_idx):
-            doc = corpus_docs[idx]
-            sparse.append(
-                {
+    dense = []
+    for hit in dense_hits[0]:
+        doc_id_val = _hit_field(hit, "doc_id")
+        chunk_val = _hit_field(hit, "chunk_text")
+        meta_val = _hit_field(hit, "metadata")
+        score_val = getattr(hit, "score", getattr(hit, "distance", 0.0))
+
+        dense.append({
+            "chunk_id": doc_id_val,
+            "chunk": chunk_val,
+            "score": float(score_val),  # 벡터 유사도 (내부용)
+            "metadata": meta_val,
+        })
+
+    # ---------- Sparse (BM25 rank-only) ----------
+    sparse = []
+    try:
+        # Corpus 가져오기 (제한)
+        corpus_docs = collection.query(
+            expr=expr,
+            output_fields=["doc_id", "chunk_text", "metadata"],
+            limit=sparse_corpus_limit,
+        )
+
+        if corpus_docs:
+            corpus_texts = [d.get("chunk_text", "") for d in corpus_docs]
+            bm25 = BM25RankOnly()
+            bm25.fit(corpus_texts)
+            ranked_indices = bm25.rank(query, corpus_texts)
+
+            for rank_idx, doc_idx in enumerate(ranked_indices[:initial_retrieve]):
+                doc = corpus_docs[doc_idx]
+                sparse.append({
                     "chunk_id": doc.get("doc_id"),
                     "chunk": doc.get("chunk_text"),
-                    "score": 1.0 / (r + 1),  # rank-based (내부 참고용)
+                    "score": 1.0,  # rank-only, 점수는 RRF에서 계산
                     "metadata": doc.get("metadata"),
-                    "rank": r + 1,
-                }
-            )
+                    "rank": rank_idx + 1,
+                })
+    except Exception as e:
+        print(f"[HYBRID] Sparse search error: {e}")
 
-    # ---------- Keyword (조항번호) ----------
-    keyword: List[Dict[str, Any]] = []
-    nums = extract_article_numbers(query)
-    if nums:
-        for num in nums:
+    # ---------- Keyword (조항번호) 검색 ----------
+    keyword = []
+    article_nums = extract_article_numbers(query)
+    
+    if article_nums:
+        for num in article_nums:
+            # 한국어 패턴
+            kr_pattern = f'metadata["article_number"] == "{num}"'
+            # 영어 패턴
+            en_pattern = f'metadata["article_number"] == "{num}"'
+            
             expr_kw_parts = []
             if doc_type_filter:
                 expr_kw_parts.append(f'metadata["doc_type"] == "{doc_type_filter}"')
-            expr_kw_parts.append(f'metadata["structure"]["article_number"] == "{num}"')
             if country_filter:
                 expr_kw_parts.append(f'metadata["country"] == "{country_filter}"')
+            
+            # 조항번호 OR 조건
+            expr_kw_parts.append(f'({kr_pattern} || {en_pattern})')
+            
             expr_kw = " && ".join(expr_kw_parts)
 
             try:
@@ -286,17 +362,15 @@ def hybrid_search(
                 kw_docs = []
 
             for r, doc in enumerate(kw_docs):
-                keyword.append(
-                    {
-                        "chunk_id": doc.get("doc_id"),
-                        "chunk": doc.get("chunk_text"),
-                        "score": 1.0,  # 내부 참고용
-                        "metadata": doc.get("metadata"),
-                        "rank": r + 1,
-                    }
-                )
+                keyword.append({
+                    "chunk_id": doc.get("doc_id"),
+                    "chunk": doc.get("chunk_text"),
+                    "score": 1.0,  # 내부 참고용
+                    "metadata": doc.get("metadata"),
+                    "rank": r + 1,
+                })
 
-    # ---------- Fusion ----------
+    # ---------- RRF Fusion ----------
     fused = rrf_fusion(
         dense_results=dense,
         sparse_results=sparse,
@@ -312,19 +386,18 @@ def hybrid_search(
     if use_reranker and fused:
         from app.services.reranker_service import rerank
 
-        # 비용 제어: reranker 후보는 fused 상위만
+        # reranker 후보 제한 (비용 절감)
         cand_size = min(len(fused), max(top_k * 4, 50))
         reranked = rerank(
             query=query,
             cands=fused[:cand_size],
-            top_k=cand_size,  # 일단 후보 내에서 전부 점수화
+            top_k=cand_size,
         )
 
-    # ---------- Threshold (AFTER rerank) ----------
+    # ---------- Score Threshold (AFTER rerank) ----------
     if score_threshold is not None:
         passed = [
-            r
-            for r in reranked
+            r for r in reranked
             if float(r.get("re_score", r.get("fusion_score", 0.0)) or 0.0) >= score_threshold
         ]
         if len(passed) >= min_results:
@@ -332,88 +405,93 @@ def hybrid_search(
         else:
             reranked = reranked[:min_results]
 
-    # ---------- Display score (0~1) ----------
+    # ---------- 점수 필드 정리 ----------
+    # raw_score: 원본 (fusion_score or re_score)
+    # score: 실제 사용 점수
+    # display_score: 0~1 정규화 (프론트엔드용)
+    
+    # 1. raw_score 추출
+    raw_scores = []
     for r in reranked:
-        base = float(r.get("re_score", r.get("fusion_score", 0.0)) or 0.0)
-        r["display_score"] = clamp01(base)
+        base = r.get("re_score", r.get("fusion_score", 0.0))
+        r["raw_score"] = float(base or 0.0)
+        raw_scores.append(r["raw_score"])
+    
+    # 2. display_score 정규화 (Min-Max)
+    if raw_scores:
+        normalized = normalize_scores_minmax(raw_scores)
+        for i, r in enumerate(reranked):
+            r["display_score"] = normalized[i]
+            r["score"] = r["raw_score"]  # score는 raw_score와 동일
+    else:
+        for r in reranked:
+            r["display_score"] = 0.0
+            r["score"] = 0.0
 
-        # metadata가 문자열인 경우에도 프론트/라우터가 다루기 쉽게 정리
+    # metadata 정리
+    for r in reranked:
         r["metadata"] = _ensure_meta_dict(r.get("metadata"))
 
-    # top_k=0이면 "필터 통과 전부"를 의미하도록 처리
+    # top_k 제한
     if top_k and top_k > 0:
         return reranked[:top_k]
     return reranked
 
 
 def match_foreign_to_korean(
-    korean_chunks: List[Dict[str, Any]],
-    foreign_pool: List[Dict[str, Any]],
+    korean_chunks: List[Dict],
+    foreign_pool: List[Dict],
     top_k_per_korean: int = 50,
     use_reranker: bool = True,
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> Dict[str, List[Dict]]:
     """
-    한국 청크(조항) 각각에 대해 외국 후보 풀에서 유사한 것 매칭
-    - router에서 한국 클릭 시 '선택 국가만' 재매칭할 때도 활용 가능
-
-    korean_chunks 예시:
-      [{
-        "chunk_id": "KR_xxx_12",
-        "chunk": "...한국 조항 텍스트...",
-        "metadata": {...}
-      }]
-
-    foreign_pool 예시:
-      hybrid_search()가 반환하는 dict 리스트를 그대로 넣어도 됨
+    한국 조항별로 외국 조항 매칭
+    
+    Args:
+        korean_chunks: 한국 조항 리스트
+        foreign_pool: 외국 조항 풀
+        top_k_per_korean: 한국 조항당 매칭할 외국 조항 수
+        use_reranker: reranker 사용 여부
+    
+    Returns:
+        {korean_chunk_id: [matched_foreign_chunks]}
     """
-    result: Dict[str, List[Dict[str, Any]]] = {}
-
-    if not korean_chunks:
-        return result
-
-    # foreign_pool의 metadata 타입 안전화
-    safe_pool = []
-    for item in foreign_pool or []:
-        item = dict(item)
-        item["metadata"] = _ensure_meta_dict(item.get("metadata"))
-        safe_pool.append(item)
-
-    if use_reranker and safe_pool:
-        from app.services.reranker_service import rerank
-
-        for kr in korean_chunks:
-            kr_id = kr.get("chunk_id")
-            kr_text = (kr.get("chunk") or "").strip()
-            if not kr_id or not kr_text:
-                continue
-
-            # 비용 제어: 너무 큰 풀은 잘라서 rerank
-            cand_size = min(len(safe_pool), max(top_k_per_korean * 8, 80))
-            cands = safe_pool[:cand_size]
-
-            try:
-                reranked = rerank(query=kr_text, cands=cands, top_k=top_k_per_korean)
-                result[kr_id] = reranked
-            except Exception:
-                # fallback: fusion_score / score 기준 정렬
-                sorted_pool = sorted(
-                    cands,
-                    key=lambda x: float(x.get("re_score", x.get("fusion_score", x.get("score", 0.0))) or 0.0),
-                    reverse=True,
-                )
-                result[kr_id] = sorted_pool[:top_k_per_korean]
-        return result
-
-    # reranker 미사용 fallback
-    for kr in korean_chunks:
-        kr_id = kr.get("chunk_id")
-        if not kr_id:
+    from app.services.reranker_service import rerank
+    
+    matched = {}
+    
+    for kr_chunk in korean_chunks:
+        kr_id = kr_chunk.get("chunk_id")
+        kr_text = kr_chunk.get("chunk", "")
+        
+        if not kr_text or not foreign_pool:
+            matched[kr_id] = []
             continue
-        sorted_pool = sorted(
-            safe_pool,
-            key=lambda x: float(x.get("fusion_score", x.get("score", 0.0)) or 0.0),
-            reverse=True,
-        )
-        result[kr_id] = sorted_pool[:top_k_per_korean]
-
-    return result
+        
+        # reranker로 매칭
+        if use_reranker:
+            candidates = rerank(
+                query=kr_text,
+                cands=foreign_pool,
+                top_k=top_k_per_korean,
+            )
+        else:
+            # reranker 없이 fusion_score 기준
+            candidates = sorted(
+                foreign_pool,
+                key=lambda x: x.get("fusion_score", 0.0),
+                reverse=True
+            )[:top_k_per_korean]
+        
+        # display_score 정규화
+        raw_scores = [c.get("re_score", c.get("fusion_score", 0.0)) for c in candidates]
+        normalized = normalize_scores_minmax(raw_scores)
+        
+        for i, c in enumerate(candidates):
+            c["display_score"] = normalized[i]
+            c["score"] = c.get("re_score", c.get("fusion_score", 0.0))
+            c["raw_score"] = c["score"]
+        
+        matched[kr_id] = candidates
+    
+    return matched
