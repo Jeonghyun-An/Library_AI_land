@@ -316,11 +316,33 @@ export const useConstitutionAPI = () => {
       throw error;
     }
   };
+  const matchForeign = async (params: {
+    search_id: string;
+    korean_text: string;
+    target_country: string;
+    top_k?: number;
+  }) => {
+    try {
+      const response = await $fetch(
+        `${apiBase}/constitution/comparative-match`,
+        {
+          method: "POST",
+          body: params,
+        },
+      );
+
+      return response;
+    } catch (error) {
+      console.error("Match foreign error:", error);
+      throw error;
+    }
+  };
 
   return {
     // 검색
     comparativeSearch,
     generatePairSummary,
+    matchForeign,
 
     // 업로드/삭제
     uploadConstitution,
