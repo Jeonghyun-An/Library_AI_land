@@ -222,6 +222,10 @@ services:
 
       RERANKER_MODEL_NAME: "BAAI/bge-reranker-v2-m3"
       RERANKER_BATCH_SIZE: "16"
+
+      RAG_HYBRID_WEIGHT_DENSE: "0.5"
+      RAG_HYBRID_WEIGHT_SPARSE: "0.3"
+      RAG_HYBRID_WEIGHT_KEYWORD: "0.2"
     depends_on:
       vllm-a4000:
         condition: service_healthy
