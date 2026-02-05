@@ -37,8 +37,64 @@ from app.api.models.comparative_match import (
 from app.services.comparative_match_service import match_foreign_by_korean
 
 router = APIRouter(prefix="/api/constitution", tags=["comparative-constitution"])
-
-
+# ==================== 국가-대륙 매핑 ====================
+COUNTRY_TO_CONTINENT = {
+    # 아시아
+    "KR": "asia", "JP": "asia", "CN": "asia", "IN": "asia", "ID": "asia",
+    "TH": "asia", "VN": "asia", "PH": "asia", "MY": "asia", "SG": "asia",
+    "MM": "asia", "KH": "asia", "LA": "asia", "BD": "asia", "PK": "asia",
+    "LK": "asia", "NP": "asia", "MN": "asia", "KP": "asia", "TW": "asia",
+    "HK": "asia", "MO": "asia",
+    
+    # 유럽
+    "GB": "europe", "DE": "europe", "FR": "europe", "IT": "europe", "ES": "europe",
+    "PT": "europe", "NL": "europe", "BE": "europe", "CH": "europe", "AT": "europe",
+    "SE": "europe", "NO": "europe", "DK": "europe", "FI": "europe", "IS": "europe",
+    "IE": "europe", "PL": "europe", "CZ": "europe", "SK": "europe", "HU": "europe",
+    "RO": "europe", "BG": "europe", "HR": "europe", "SI": "europe", "EE": "europe",
+    "LV": "europe", "LT": "europe", "GR": "europe", "CY": "europe", "MT": "europe",
+    "LU": "europe", "MC": "europe", "LI": "europe", "AD": "europe", "SM": "europe",
+    "VA": "europe", "RS": "europe", "BA": "europe", "MK": "europe", "AL": "europe",
+    "ME": "europe", "XK": "europe", "UA": "europe", "BY": "europe", "MD": "europe",
+    "RU": "europe",
+    
+    # 아프리카
+    "ZA": "africa", "EG": "africa", "NG": "africa", "KE": "africa", "GH": "africa",
+    "ET": "africa", "TZ": "africa", "UG": "africa", "DZ": "africa", "MA": "africa",
+    "AO": "africa", "SD": "africa", "MZ": "africa", "CM": "africa", "CI": "africa",
+    "NE": "africa", "BF": "africa", "ML": "africa", "MW": "africa", "ZM": "africa",
+    "SN": "africa", "SO": "africa", "TD": "africa", "ZW": "africa", "GN": "africa",
+    "RW": "africa", "BJ": "africa", "TN": "africa", "BI": "africa", "SS": "africa",
+    "TG": "africa", "SL": "africa", "LY": "africa", "LR": "africa", "MR": "africa",
+    "CF": "africa", "ER": "africa", "GM": "africa", "BW": "africa", "GA": "africa",
+    "GW": "africa", "MU": "africa", "SZ": "africa", "DJ": "africa", "KM": "africa",
+    "CV": "africa", "ST": "africa", "SC": "africa", "LS": "africa", "GQ": "africa",
+    
+    # 아메리카
+    "US": "americas", "CA": "americas", "MX": "americas", "BR": "americas", "AR": "americas",
+    "CL": "americas", "CO": "americas", "PE": "americas", "VE": "americas", "EC": "americas",
+    "GT": "americas", "CU": "americas", "BO": "americas", "HT": "americas", "DO": "americas",
+    "HN": "americas", "PY": "americas", "NI": "americas", "SV": "americas", "CR": "americas",
+    "PA": "americas", "UY": "americas", "JM": "americas", "TT": "americas", "GY": "americas",
+    "SR": "americas", "BZ": "americas", "BS": "americas", "BB": "americas", "LC": "americas",
+    "GD": "americas", "VC": "americas", "AG": "americas", "DM": "americas", "KN": "americas",
+    
+    # 오세아니아
+    "AU": "oceania", "NZ": "oceania", "PG": "oceania", "FJ": "oceania", "SB": "oceania",
+    "VU": "oceania", "NC": "oceania", "PF": "oceania", "WS": "oceania", "GU": "oceania",
+    "KI": "oceania", "FM": "oceania", "TO": "oceania", "PW": "oceania", "MH": "oceania",
+    "NR": "oceania", "TV": "oceania", "AS": "oceania", "MP": "oceania",
+    
+    # 중동
+    "SA": "middle_east", "IR": "middle_east", "IQ": "middle_east", "AE": "middle_east",
+    "IL": "middle_east", "JO": "middle_east", "SY": "middle_east", "LB": "middle_east",
+    "YE": "middle_east", "OM": "middle_east", "KW": "middle_east", "QA": "middle_east",
+    "BH": "middle_east", "PS": "middle_east", "TR": "middle_east", "AM": "middle_east",
+    "AZ": "middle_east", "GE": "middle_east", "AF": "middle_east",
+}
+def get_continent(country_code: str) -> str:
+    """국가 코드로 대륙 반환"""
+    return COUNTRY_TO_CONTINENT.get(country_code, "asia")
 # ==================== 요청/응답 모델 ====================
 
 class ConstitutionArticleResult(BaseModel):
@@ -60,6 +116,7 @@ class ConstitutionArticleResult(BaseModel):
     has_korean: bool
 
     # 검색 점수
+    raw_score: Optional[float] = None
     score: float
     display_score: float
 
@@ -70,6 +127,10 @@ class ConstitutionArticleResult(BaseModel):
 
     # 하이라이트용 bbox
     bbox_info: List[Dict[str, Any]] = Field(default_factory=list)
+    continent: str = Field(default="asia", description="대륙 정보")
+    version: Optional[str] = Field(None, description="버전/개정일")
+    is_bilingual: bool = Field(False, description="이중언어 여부")
+
 
 
 class ConstitutionUploadRequest(BaseModel):
@@ -1373,7 +1434,8 @@ async def _search_korean_constitution(
             page=int(meta.get('page', 1) or 1),
             page_english=meta.get('page_english'),
             page_korean=meta.get('page_korean'),
-            bbox_info=meta.get('bbox_info', []) if isinstance(meta.get('bbox_info'), list) else []
+            bbox_info=meta.get('bbox_info', []) if isinstance(meta.get('bbox_info'), list) else [],
+            continent=get_continent(meta.get('country', 'KR'))
         )
         
         results.append(result)
@@ -1436,7 +1498,8 @@ async def _search_foreign_candidate_pool(
                 page=int(meta.get("page", 1) or 1),
                 page_english=meta.get("page_english"),
                 page_korean=meta.get("page_korean"),
-                bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else []
+                bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else [],
+                continent=get_continent(meta.get("country", ""))
             )
         )
 
@@ -1524,7 +1587,8 @@ def _build_pairs_optimized(
                 page=int(meta.get("page", 1) or 1),
                 page_english=meta.get("page_english"),
                 page_korean=meta.get("page_korean"),
-                bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else []
+                bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else [],
+                continent=get_continent(meta.get("country", ""))
             )
             foreign_articles.append(article)
         
@@ -1571,7 +1635,7 @@ async def comparative_search(request: ComparativeSearchRequest):
         collection=collection,
         query=request.query,
         embedding_model=emb_model,
-        top_k=request.korean_top_k,
+        top_k=max(1, request.korean_top_k),
         score_threshold=0.35,
         min_results=3
     )
