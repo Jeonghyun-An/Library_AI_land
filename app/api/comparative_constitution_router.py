@@ -15,7 +15,7 @@ import json
 import time
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-
+import traceback
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import Response, StreamingResponse
 import httpx
@@ -30,6 +30,11 @@ from app.services.chunkers.comparative_constitution_chunker import (
     chunk_constitution_document
 )
 from app.services.hybrid_search_service import hybrid_search
+from app.api.models.comparative_match import (
+    ComparativeMatchRequest,
+    ComparativeMatchResponse,
+)
+from app.services.comparative_match_service import match_foreign_by_korean
 
 router = APIRouter(prefix="/api/constitution", tags=["comparative-constitution"])
 
@@ -56,6 +61,7 @@ class ConstitutionArticleResult(BaseModel):
 
     # 검색 점수
     score: float
+    display_score: float
 
     # 페이지
     page: int
@@ -99,6 +105,7 @@ class ComparativeSearchResponse(BaseModel):
     pairs: List[ComparativePairResult] = Field(default_factory=list)
     summary: Optional[str] = None
     search_time_ms: float
+    search_id: Optional[str] = None
 
 
 class PairSummaryCountryPack(BaseModel):
@@ -177,43 +184,7 @@ def _cache_set(key: str, summary: str):
     
     # ==================== Milvus Hit helpers ====================
 
-def _hit_field(hit, field: str, default=None):
-    """
-    PyMilvus hit/entity 호환 접근:
-    - hit.entity 가 dict 인 경우
-    - hit.entity 가 Entity 객체인 경우 (속성 접근)
-    - hit 자체가 dict-like 인 경우
-    """
-    # 1) hit.entity 먼저 시도
-    ent = getattr(hit, "entity", None)
 
-    if ent is not None:
-        # dict-like
-        if isinstance(ent, dict):
-            return ent.get(field, default)
-
-        # Entity object: getattr 사용
-        if hasattr(ent, field):
-            try:
-                return getattr(ent, field)
-            except Exception:
-                pass
-
-        # 일부 구현에서 ent[field] 가능
-        try:
-            return ent[field]
-        except Exception:
-            pass
-
-    # 2) hit가 dict-like 일 수 있음
-    if isinstance(hit, dict):
-        return hit.get(field, default)
-
-    # 3) hit.get(field) 형태 지원할 수도 있음 (default 인자 불가)
-    try:
-        return hit.get(field)
-    except Exception:
-        return default
 
 
 def _ensure_meta_dict(meta):
@@ -1355,10 +1326,11 @@ async def list_constitutions(
 
 async def _search_korean_constitution(
     collection,
-    query_embedding,
     query: str,
     embedding_model,
-    top_k: int
+    top_k: int,
+    score_threshold: float = 0.0,
+    min_results: int = 1,
 ) -> List[ConstitutionArticleResult]:
     """한국 헌법 검색 (하이브리드)"""
     
@@ -1396,7 +1368,8 @@ async def _search_korean_constitution(
             text_type=meta.get('text_type', 'korean_only'),
             has_english=bool(meta.get('has_english', False)),
             has_korean=bool(meta.get('has_korean', True)),
-            score=float(item.get('re_score', item.get('fusion_score', item.get('score', 0.0)))),
+            score=float(item.get('re_score', item.get('fusion_score', 0.0))),
+            display_score=float(item.get('display_score', 0.0)),
             page=int(meta.get('page', 1) or 1),
             page_english=meta.get('page_english'),
             page_korean=meta.get('page_korean'),
@@ -1407,7 +1380,8 @@ async def _search_korean_constitution(
     
     return results[:top_k]
 
-
+# 현재는 comparative_search에서 직접 hybrid_search를 호출함.
+# 향후 국가별 풀 전략 분리 시 이 함수로 통합 예정.
 async def _search_foreign_candidate_pool(
     collection,
     query_embedding,
@@ -1457,7 +1431,8 @@ async def _search_foreign_candidate_pool(
                 text_type=meta.get("text_type"),
                 has_english=bool(meta.get("has_english", False)),
                 has_korean=bool(meta.get("has_korean", False)),
-                score=float(item.get('re_score', item.get('fusion_score', item.get('score', 0.0)))),
+                score=float(item.get('re_score', item.get('fusion_score', 0.0))),
+                display_score=float(item.get('display_score', 0.0)),
                 page=int(meta.get("page", 1) or 1),
                 page_english=meta.get("page_english"),
                 page_korean=meta.get("page_korean"),
@@ -1467,9 +1442,10 @@ async def _search_foreign_candidate_pool(
 
     return _dedupe_articles(results)
 
+# ==================== Pair 빌드 - 핵심 함수 ====================
 def _build_pairs_optimized(
     korean_results: List[ConstitutionArticleResult],
-    foreign_pool: List[Dict],  # ✅ 원본 하이브리드 검색 결과
+    foreign_pool: List[Dict],
     per_country: int,
     cursor_map: Optional[Dict[str, int]],
     use_reranker: bool = True
@@ -1543,7 +1519,8 @@ def _build_pairs_optimized(
                 text_type=meta.get("text_type", "english_only"),
                 has_english=bool(meta.get("has_english", False)),
                 has_korean=bool(meta.get("has_korean", False)),
-                score=float(item.get('re_score', item.get('fusion_score', item.get('score', 0.0)))),
+                score=float(item.get('re_score', item.get('fusion_score', 0.0))),
+                display_score=float(item.get('display_score', 0.0)),
                 page=int(meta.get("page", 1) or 1),
                 page_english=meta.get("page_english"),
                 page_korean=meta.get("page_korean"),
@@ -1591,11 +1568,12 @@ async def comparative_search(request: ComparativeSearchRequest):
 
     # 1. 한국 헌법 검색 (1회)
     korean_results = await _search_korean_constitution(
-        collection,
-        query_embedding,
+        collection=collection,
         query=request.query,
         embedding_model=emb_model,
-        top_k=request.korean_top_k
+        top_k=request.korean_top_k,
+        score_threshold=0.35,
+        min_results=3
     )
     korean_results = _dedupe_articles(korean_results)
 
@@ -1607,9 +1585,6 @@ async def comparative_search(request: ComparativeSearchRequest):
         top_k=request.foreign_pool_size,
         initial_retrieve=200,
         country_filter=request.target_country,
-        dense_weight=0.5,
-        sparse_weight=0.3,
-        keyword_weight=0.2,
         use_reranker=False  # 여기선 리랭킹 안 함 (매칭 시 수행)
     )
     
@@ -1628,6 +1603,15 @@ async def comparative_search(request: ComparativeSearchRequest):
         cursor_map=request.cursor_map,
         use_reranker=True  # 매칭 시 리랭킹
     )
+    from app.services.comparative_cache import set_search_cache
+    import uuid
+
+    search_id = str(uuid.uuid4())
+
+    set_search_cache(
+        search_id=search_id,
+        foreign_pool=foreign_pool_raw,  # hybrid_search 원본 결과
+    )
 
     # 요약 (선택)
     summary = None
@@ -1638,7 +1622,8 @@ async def comparative_search(request: ComparativeSearchRequest):
         query=request.query,
         pairs=pairs,
         summary=summary,
-        search_time_ms=(time.time() - start) * 1000
+        search_time_ms=(time.time() - start) * 1000,
+        search_id=search_id, 
     )
 
 def build_pair_summary_prompt(
@@ -1865,6 +1850,31 @@ async def comparative_summary(req: ComparativeSummaryRequest):
     except Exception as e:
         print(f"[PAIR-SUMMARY] Error: {e}")
         raise HTTPException(500, f"pair 요약 생성 실패: {e}")
+    
+@router.post(
+    "/comparative-match",
+    response_model=ComparativeMatchResponse,
+    summary="한국 조항 클릭 → 특정 국가 헌법 재매칭",
+)
+async def comparative_match(req: ComparativeMatchRequest):
+
+    try:
+        matches = match_foreign_by_korean(
+            search_id=req.search_id,
+            korean_text=req.korean_text,
+            target_country=req.target_country,
+            top_k=req.top_k,
+        )
+
+        return {
+            "country": req.target_country,
+            "matches": matches,
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"재매칭 실패: {e}")
 
 # ==================== PDF 페이지 이미지 엔드포인트 ====================
 
