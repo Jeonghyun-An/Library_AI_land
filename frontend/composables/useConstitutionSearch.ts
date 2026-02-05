@@ -117,7 +117,7 @@ export const useConstitutionSearch = () => {
   const loadAvailableCountries = async () => {
     try {
       const response = await $fetch<{ countries: ConstitutionMetadata[] }>(
-        `${apiBase}/api/constitution/countries`,
+        `${apiBase}/constitution/countries`,
       );
       availableCountries.value = response.countries;
     } catch (err) {
