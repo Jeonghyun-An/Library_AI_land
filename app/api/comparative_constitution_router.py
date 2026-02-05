@@ -29,12 +29,13 @@ from app.services.chunkers.comparative_constitution_chunker import (
     ComparativeConstitutionChunker,
     chunk_constitution_document
 )
-from app.services.hybrid_search_service import hybrid_search
 from app.api.models.comparative_match import (
     ComparativeMatchRequest,
     ComparativeMatchResponse,
 )
 from app.services.comparative_match_service import match_foreign_by_korean
+from app.services.hybrid_search_service import hybrid_search, match_foreign_to_korean
+from app.services.comparative_cache import set_search_cache
 
 router = APIRouter(prefix="/api/constitution", tags=["comparative-constitution"])
 # ==================== 국가-대륙 매핑 ====================
@@ -1619,29 +1620,75 @@ def _build_pairs_optimized(
 
 @router.post("/comparative-search", response_model=ComparativeSearchResponse)
 async def comparative_search(request: ComparativeSearchRequest):
+    """
+    비교 헌법 검색
+    
+    1. 한국 헌법 검색 (top_k개)
+    2. 외국 헌법 풀 검색 (pool_size개)
+    3. 한국 조항별로 외국 조항 매칭
+    4. 점수 정규화 (raw_score, score, display_score)
+    """
     import time
     start = time.time()
 
     emb_model = get_embedding_model()
-    query_embedding = emb_model.encode([request.query], normalize_embeddings=True)[0]
-
     collection = get_collection(
         os.getenv("MILVUS_COLLECTION", "library_books"),
         dim=1024
     )
 
-    # 1. 한국 헌법 검색 (1회)
-    korean_results = await _search_korean_constitution(
-        collection=collection,
+    # ========== 1. 한국 헌법 검색 ==========
+    korean_results_raw = hybrid_search(
         query=request.query,
+        collection=collection,
         embedding_model=emb_model,
         top_k=max(1, request.korean_top_k),
+        initial_retrieve=100,
+        country_filter="KR",
+        use_reranker=True,
         score_threshold=0.35,
-        min_results=3
+        min_results=3,
+        doc_type_filter="constitution",
     )
+
+    # ConstitutionArticleResult로 변환
+    korean_results = []
+    for item in korean_results_raw:
+        meta_raw = item.get('metadata', {})
+        meta = _ensure_meta_dict(meta_raw)
+        doc_id = meta.get('doc_id') or meta.get('constitution_doc_id')
+        
+        result = ConstitutionArticleResult(
+            country=meta.get('country', 'KR'),
+            country_name=meta.get('country_name', '대한민국'),
+            constitution_title=meta.get('constitution_title', '대한민국헌법'),
+            display_path=meta.get('display_path', ''),
+            structure={
+                **(meta.get('structure', {}) if isinstance(meta.get('structure'), dict) else {}),
+                'doc_id': doc_id
+            },
+            english_text=meta.get('english_text'),
+            korean_text=meta.get('korean_text'),
+            text_type=meta.get('text_type', 'korean_only'),
+            has_english=bool(meta.get('has_english', False)),
+            has_korean=bool(meta.get('has_korean', True)),
+            
+            # 점수 3가지
+            raw_score=float(item.get('raw_score', 0.0)),
+            score=float(item.get('score', 0.0)),
+            display_score=float(item.get('display_score', 0.0)),
+            
+            page=int(meta.get('page', 1) or 1),
+            page_english=meta.get('page_english'),
+            page_korean=meta.get('page_korean'),
+            bbox_info=meta.get('bbox_info', []) if isinstance(meta.get('bbox_info'), list) else [],
+            continent=get_continent(meta.get('country', 'KR'))
+        )
+        korean_results.append(result)
+
     korean_results = _dedupe_articles(korean_results)
 
-    # 2. 외국 헌법 풀 검색 (1회) - 원본 Dict 형태로 받기
+    # ========== 2. 외국 헌법 풀 검색 ==========
     foreign_pool_raw = hybrid_search(
         query=request.query,
         collection=collection,
@@ -1649,7 +1696,8 @@ async def comparative_search(request: ComparativeSearchRequest):
         top_k=request.foreign_pool_size,
         initial_retrieve=200,
         country_filter=request.target_country,
-        use_reranker=False  # 여기선 리랭킹 안 함 (매칭 시 수행)
+        use_reranker=False,  # 매칭 시 수행
+        doc_type_filter="constitution",
     )
     
     # KR 제외
@@ -1659,35 +1707,107 @@ async def comparative_search(request: ComparativeSearchRequest):
             if r.get('metadata', {}).get('country') != 'KR'
         ]
 
-    # 3. Pair 생성 - 한국 조항별 매칭
-    pairs = _build_pairs_optimized(
-        korean_results=korean_results,
-        foreign_pool=foreign_pool_raw,  # 원본 Dict 리스트 전달
-        per_country=request.foreign_per_country,
-        cursor_map=request.cursor_map,
-        use_reranker=True  # 매칭 시 리랭킹
+    # 검색 캐시 저장 (재매칭용)
+    search_id = hashlib.md5(f"{request.query}_{start}".encode()).hexdigest()[:16]
+    set_search_cache(search_id, foreign_pool_raw)
+
+    # ========== 3. 한국 조항별 매칭 ==========
+    korean_chunks = []
+    for kr in korean_results:
+        korean_chunks.append({
+            'chunk_id': kr.structure.get('doc_id', f"kr_{kr.structure.get('article_number')}"),
+            'chunk': kr.korean_text or kr.english_text or '',
+            'metadata': {
+                'country': kr.country,
+                'article_number': kr.structure.get('article_number'),
+                'display_path': kr.display_path
+            },
+            'original': kr
+        })
+    
+    matched = match_foreign_to_korean(
+        korean_chunks=korean_chunks,
+        foreign_pool=foreign_pool_raw,
+        top_k_per_korean=50,
+        use_reranker=True
     )
-    from app.services.comparative_cache import set_search_cache
-    import uuid
 
-    search_id = str(uuid.uuid4())
+    # ========== 4. Pair 생성 ==========
+    cursor_map = request.cursor_map or {}
+    pairs = []
+    
+    for kr_chunk in korean_chunks:
+        kr = kr_chunk['original']
+        kr_id = kr_chunk['chunk_id']
+        
+        # 매칭된 외국 조항들
+        foreign_matches = matched.get(kr_id, [])
+        
+        # ConstitutionArticleResult로 변환
+        foreign_articles = []
+        for item in foreign_matches:
+            meta_raw = item.get('metadata', {})
+            meta = _ensure_meta_dict(meta_raw)
+            doc_id = meta.get('doc_id')
+            
+            article = ConstitutionArticleResult(
+                country=meta.get("country", ""),
+                country_name=meta.get("country_name", ""),
+                constitution_title=meta.get("constitution_title", ""),
+                display_path=meta.get("display_path", ""),
+                structure={
+                    **(meta.get('structure', {}) if isinstance(meta.get('structure'), dict) else {}),
+                    'doc_id': doc_id
+                },
+                english_text=meta.get("english_text"),
+                korean_text=meta.get("korean_text"),
+                text_type=meta.get("text_type", "english_only"),
+                has_english=bool(meta.get("has_english", False)),
+                has_korean=bool(meta.get("has_korean", False)),
+                
+                # 점수 3가지
+                raw_score=float(item.get('raw_score', 0.0)),
+                score=float(item.get('score', 0.0)),
+                display_score=float(item.get('display_score', 0.0)),
+                
+                page=int(meta.get("page", 1) or 1),
+                page_english=meta.get("page_english"),
+                page_korean=meta.get("page_korean"),
+                bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else [],
+                continent=get_continent(meta.get("country", ""))
+            )
+            foreign_articles.append(article)
+        
+        # 중복 제거 및 국가별 그룹화
+        foreign_articles = _dedupe_articles(foreign_articles)
+        by_country = _group_by_country(foreign_articles)
+        
+        # 국가별 페이징
+        foreign_block = {}
+        for country, items in by_country.items():
+            start_idx = cursor_map.get(country, 0)
+            sliced, next_cursor = _paginate(items, start_idx, request.foreign_per_country)
+            
+            foreign_block[country] = CountryPagedResult(
+                items=sliced,
+                next_cursor=next_cursor
+            )
+        
+        pairs.append(
+            ComparativePairResult(
+                korean=kr,
+                foreign=foreign_block
+            )
+        )
 
-    set_search_cache(
-        search_id=search_id,
-        foreign_pool=foreign_pool_raw,  # hybrid_search 원본 결과
-    )
-
-    # 요약 (선택)
-    summary = None
-    if request.generate_summary and pairs:
-        summary = f"'{request.query}'에 대해 한국 헌법 조항과 외국 헌법 조항들을 국가별로 비교 제공합니다."
+    elapsed = (time.time() - start) * 1000
 
     return ComparativeSearchResponse(
         query=request.query,
         pairs=pairs,
-        summary=summary,
-        search_time_ms=(time.time() - start) * 1000,
-        search_id=search_id, 
+        summary=None,  # 추후 구현
+        search_time_ms=elapsed,
+        search_id=search_id
     )
 
 def build_pair_summary_prompt(
