@@ -154,6 +154,66 @@ def rrf_fusion(
     return fused_results
 
 
+def match_foreign_to_korean(
+    korean_chunks: List[Dict],
+    foreign_pool: List[Dict],
+    top_k_per_korean: int = 3,
+    use_reranker: bool = True
+) -> Dict[str, List[Dict]]:
+    """
+    한국 조항 각각에 대해 외국 조항 풀에서 유사도 높은 것을 매칭
+    
+    Args:
+        korean_chunks: 한국 조항 리스트 (이미 검색된)
+        foreign_pool: 외국 조항 풀 (이미 검색된)
+        top_k_per_korean: 한국 조항당 매칭할 외국 조항 수
+        use_reranker: 리랭커 사용 여부
+    
+    Returns:
+        {korean_chunk_id: [foreign_chunk1, foreign_chunk2, ...]}
+    """
+    from app.services.reranker_service import rerank
+    
+    result = {}
+    
+    for kr_chunk in korean_chunks:
+        kr_text = kr_chunk.get('chunk', '')
+        kr_id = kr_chunk.get('chunk_id')
+        
+        if not kr_text or not kr_id:
+            continue
+        
+        # 외국 조항 풀에서 이 한국 조항과 유사도 계산
+        if use_reranker and foreign_pool:
+            try:
+                # Reranker로 유사도 재계산
+                reranked = rerank(
+                    query=kr_text,  # 한국 조항을 쿼리로 사용
+                    cands=foreign_pool.copy(),  # 외국 조항 풀
+                    top_k=top_k_per_korean
+                )
+                result[kr_id] = reranked
+            except Exception as e:
+                print(f"[MATCH] Reranking failed for {kr_id}: {e}")
+                # Fallback: fusion_score로 정렬
+                sorted_pool = sorted(
+                    foreign_pool, 
+                    key=lambda x: x.get('fusion_score', x.get('score', 0)), 
+                    reverse=True
+                )
+                result[kr_id] = sorted_pool[:top_k_per_korean]
+        else:
+            # Reranker 없으면 기존 점수로 정렬
+            sorted_pool = sorted(
+                foreign_pool, 
+                key=lambda x: x.get('fusion_score', x.get('score', 0)), 
+                reverse=True
+            )
+            result[kr_id] = sorted_pool[:top_k_per_korean]
+    
+    return result
+
+
 def hybrid_search(
     query: str,
     collection,
@@ -164,7 +224,9 @@ def hybrid_search(
     dense_weight: float = 0.5,
     sparse_weight: float = 0.3,
     keyword_weight: float = 0.2,
-    use_reranker: bool = True
+    use_reranker: bool = True,
+    score_threshold: Optional[float] = None,  # ✅ 추가
+    min_results: int = 1  # ✅ 추가
 ) -> List[Dict]:
     """
     하이브리드 검색 실행
@@ -173,16 +235,28 @@ def hybrid_search(
         query: 검색 쿼리
         collection: Milvus 컬렉션
         embedding_model: 임베딩 모델
-        top_k: 최종 반환 개수
+        top_k: 최종 반환 개수 (score_threshold 없을 때)
         initial_retrieve: 초기 검색량
         country_filter: 국가 필터 (예: "KR")
         dense_weight: Dense 가중치
         sparse_weight: Sparse 가중치
         keyword_weight: Keyword 가중치
         use_reranker: 리랭커 사용 여부
+        score_threshold: 점수 임계값 (이상인 결과만 반환, None이면 top_k 사용)
+        min_results: score_threshold 사용 시 최소 반환 개수
     
     Returns:
         통합 검색 결과 (reranker 적용 완료)
+    
+    Examples:
+        # 방법 1: 상위 10개만
+        results = hybrid_search(query, collection, model, top_k=10)
+        
+        # 방법 2: 점수 0.7 이상 모두 (최소 1개)
+        results = hybrid_search(query, collection, model, score_threshold=0.7, min_results=1)
+        
+        # 방법 3: 점수 0.5 이상 모두 (최소 3개)
+        results = hybrid_search(query, collection, model, score_threshold=0.5, min_results=3)
     """
     print(f"[HYBRID-SEARCH] Query: '{query[:50]}...', country_filter={country_filter}")
     
@@ -220,11 +294,21 @@ def hybrid_search(
     print(f"[HYBRID-SEARCH] Dense: {len(dense_list)} results")
     
     # 2. Sparse Search (BM25)
-    query_result = collection.query(
-        expr=expr or "",
-        output_fields=["doc_id", "chunk_text", "metadata"],
-        limit=min(1000, initial_retrieve * 3)
-    )
+    # BM25용 corpus 가져오기 (expr 필터 사용)
+    if country_filter:
+        corpus_expr = f'metadata["country"] == "{country_filter}"'
+    else:
+        corpus_expr = 'id >= 0'
+    
+    try:
+        query_result = collection.query(
+            expr=corpus_expr,
+            output_fields=["doc_id", "chunk_text", "metadata"],
+            limit=min(1000, initial_retrieve * 3)
+        )
+    except Exception as e:
+        print(f"[HYBRID-SEARCH] Corpus query failed: {e}")
+        query_result = []
     
     if query_result:
         bm25 = BM25()
@@ -243,7 +327,7 @@ def hybrid_search(
         for rank, (idx, score, doc) in enumerate(sparse_scores[:initial_retrieve]):
             sparse_list.append({
                 'chunk_id': doc.get("doc_id"),
-                'chunk': doc.get("chunk_text"),  # ✅ reranker 호환
+                'chunk': doc.get("chunk_text"),
                 'score': score,
                 'metadata': doc.get("metadata"),
                 'rank': rank + 1
@@ -278,13 +362,14 @@ def hybrid_search(
                 for rank, doc in enumerate(keyword_results):
                     keyword_list.append({
                         'chunk_id': doc.get("doc_id"),
-                        'chunk': doc.get("chunk_text"),  # ✅ reranker 호환
+                        'chunk': doc.get("chunk_text"),
                         'score': 10.0,
                         'metadata': doc.get("metadata"),
                         'rank': rank + 1
                     })
             except Exception as e:
-                print(f"[HYBRID-SEARCH] Keyword search failed: {e}")
+                print(f"[HYBRID-SEARCH] Keyword search failed for article {article_num}: {e}")
+                continue
         
         print(f"[HYBRID-SEARCH] Keyword: {len(keyword_list)} results")
     
@@ -309,15 +394,53 @@ def hybrid_search(
             reranked = rerank(
                 query=query,
                 cands=fused_results[:min(len(fused_results), top_k * 3)],
-                top_k=top_k
+                top_k=top_k * 2  # 여유있게 가져오기
             )
             
             print(f"[HYBRID-SEARCH] Reranked: {len(reranked)} results")
-            return reranked
+            
+            #  점수 기반 필터링
+            if score_threshold is not None:
+                filtered = [
+                    r for r in reranked 
+                    if r.get('re_score', r.get('fusion_score', 0)) >= score_threshold
+                ]
+                
+                # 최소 개수 보장
+                if len(filtered) < min_results:
+                    print(f"[HYBRID-SEARCH] Score threshold {score_threshold} → {len(filtered)} results, "
+                          f"padding to {min_results}")
+                    return reranked[:min_results]
+                
+                print(f"[HYBRID-SEARCH] Score threshold {score_threshold} → {len(filtered)} results")
+                return filtered
+            
+            return reranked[:top_k]
         
         except Exception as e:
             print(f"[HYBRID-SEARCH] Reranking failed: {e}")
             # Reranker 실패 시 융합 결과 반환
+            
+            # 점수 필터링 (fusion_score 기준)
+            if score_threshold is not None:
+                filtered = [
+                    r for r in fused_results 
+                    if r.get('fusion_score', r.get('score', 0)) >= score_threshold
+                ]
+                if len(filtered) < min_results:
+                    return fused_results[:min_results]
+                return filtered
+            
             return fused_results[:top_k]
+    
+    # Reranker 없을 때도 점수 필터링
+    if score_threshold is not None:
+        filtered = [
+            r for r in fused_results 
+            if r.get('fusion_score', r.get('score', 0)) >= score_threshold
+        ]
+        if len(filtered) < min_results:
+            return fused_results[:min_results]
+        return filtered
     
     return fused_results[:top_k]
