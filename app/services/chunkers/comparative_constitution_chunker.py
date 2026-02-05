@@ -630,7 +630,6 @@ class ComparativeConstitutionChunker:
 
             use_two_cols = False
             if self.assume_two_columns:
-                # ✅ PATCH: dict_lines까지 같이 넣어서 오판 방지
                 use_two_cols = _is_two_column_page(words, page.rect.width, dict_lines=dict_lines)
 
             if use_two_cols:
@@ -766,7 +765,6 @@ class ComparativeConstitutionChunker:
         for (meta, lines) in kept:
             page_no = meta["page_no"]
 
-            # ✅ KR 헌법 같은 단일 문서는 여기(non-bilingual)로 들어오는게 일반적
             if not is_bilingual:
                 for ln in lines:
                     art = _extract_article_no(ln["text"])
@@ -799,8 +797,6 @@ class ComparativeConstitutionChunker:
                         current["bbox_lines"].extend(_pack_bbox_info([ln], page_no, max_lines=1))
 
             else:
-                # 기존 v3.1/3.2에서는 bilingual 처리 별도인데,
-                # 너가 지금 겪는 문제는 KR mono라서 여기까지는 안건드림.
                 for ln in lines:
                     art = _extract_article_no(ln["text"])
                     if art:

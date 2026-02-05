@@ -22,7 +22,6 @@ import httpx
 from pydantic import BaseModel, Field
 import fitz  # PyMuPDF
 
-# 기존 서비스 재사용
 from app.services.embedding_model import get_embedding_model
 from app.services.milvus_service import get_milvus_client, get_collection
 from app.services.minio_service import get_minio_client
@@ -30,6 +29,7 @@ from app.services.chunkers.comparative_constitution_chunker import (
     ComparativeConstitutionChunker,
     chunk_constitution_document
 )
+from app.services.hybrid_search_service import hybrid_search
 
 router = APIRouter(prefix="/api/constitution", tags=["comparative-constitution"])
 
@@ -1356,149 +1356,227 @@ async def list_constitutions(
 async def _search_korean_constitution(
     collection,
     query_embedding,
+    query: str,
+    embedding_model,
     top_k: int
 ) -> List[ConstitutionArticleResult]:
-    search_params = {
-        "metric_type": "IP",
-        "params": {"ef": 256}
-    }
-
-    expr = 'metadata["country"] == "KR" and metadata["doc_type"] == "constitution"'
-
-    search_result = collection.search(
-        data=[query_embedding.tolist()],
-        anns_field="embedding",
-        param=search_params,
-        limit=top_k * 2,
-        expr=expr,
-        output_fields=["doc_id", "chunk_text", "metadata"]
+    """한국 헌법 검색 (하이브리드)"""
+    
+    hybrid_results = hybrid_search(
+        query=query,
+        collection=collection,
+        embedding_model=embedding_model,
+        top_k=top_k * 2,
+        initial_retrieve=100,
+        country_filter="KR",
+        dense_weight=0.5,
+        sparse_weight=0.3,
+        keyword_weight=0.2,
+        use_reranker=True
     )
-
+    
+    # 결과 변환
     results = []
-    for hits in search_result:
-        for hit in hits:
-            meta_raw = _hit_field(hit, "metadata", {})
-            meta = _ensure_meta_dict(meta_raw)
-            doc_id = meta.get('doc_id') or meta.get('constitution_doc_id')
-            result = ConstitutionArticleResult(
-                country=meta.get('country', 'KR'),
-                country_name=meta.get('country_name', '대한민국'),
-                constitution_title=meta.get('constitution_title', '대한민국헌법'),
-                display_path=meta.get('display_path', ''),
-                structure={
-                    **(meta.get('structure', {}) if isinstance(meta.get('structure', {}), dict) else {}),
-                    'doc_id': doc_id
-                },
-                english_text=meta.get('english_text'),
-                korean_text=meta.get('korean_text'),
-                text_type=meta.get('text_type', 'korean_only'),
-                has_english=bool(meta.get('has_english', False)),
-                has_korean=bool(meta.get('has_korean', True)),
-                score=float(getattr(hit, "score", 0.0)),
-                page=int(meta.get('page', 1) or 1),
-                page_english=meta.get('page_english'),
-                page_korean=meta.get('page_korean'),
-                bbox_info=meta.get('bbox_info', []) if isinstance(meta.get('bbox_info', []), list) else []
-            )
-            results.append(result)
-
+    for item in hybrid_results:
+        meta_raw = item.get('metadata', {})
+        meta = _ensure_meta_dict(meta_raw)
+        doc_id = meta.get('doc_id') or meta.get('constitution_doc_id')
+        
+        result = ConstitutionArticleResult(
+            country=meta.get('country', 'KR'),
+            country_name=meta.get('country_name', '대한민국'),
+            constitution_title=meta.get('constitution_title', '대한민국헌법'),
+            display_path=meta.get('display_path', ''),
+            structure={
+                **(meta.get('structure', {}) if isinstance(meta.get('structure', {}), dict) else {}),
+                'doc_id': doc_id
+            },
+            english_text=meta.get('english_text'),
+            korean_text=meta.get('korean_text'),
+            text_type=meta.get('text_type', 'korean_only'),
+            has_english=bool(meta.get('has_english', False)),
+            has_korean=bool(meta.get('has_korean', True)),
+            score=float(item.get('re_score', item.get('fusion_score', item.get('score', 0.0)))),
+            page=int(meta.get('page', 1) or 1),
+            page_english=meta.get('page_english'),
+            page_korean=meta.get('page_korean'),
+            bbox_info=meta.get('bbox_info', []) if isinstance(meta.get('bbox_info'), list) else []
+        )
+        
+        results.append(result)
+    
     return results[:top_k]
 
 
 async def _search_foreign_candidate_pool(
     collection,
     query_embedding,
+    query: str,
+    embedding_model,
     pool_size: int,
     target_country: Optional[str] = None
 ) -> List[ConstitutionArticleResult]:
-
-    search_params = {
-        "metric_type": "IP",
-        "params": {"ef": 256}
-    }
-
-    if target_country:
-        expr = f'metadata["country"] == "{target_country}" and metadata["doc_type"] == "constitution"'
-    else:
-        expr = 'metadata["country"] != "KR" and metadata["doc_type"] == "constitution"'
-
-    raw = collection.search(
-        data=[query_embedding.tolist()],
-        anns_field="embedding",
-        param=search_params,
-        limit=pool_size,
-        expr=expr,
-        output_fields=["metadata"]
+    """외국 헌법 후보 풀 검색 (하이브리드)"""
+    
+    hybrid_results = hybrid_search(
+        query=query,
+        collection=collection,
+        embedding_model=embedding_model,
+        top_k=pool_size,
+        initial_retrieve=200,
+        country_filter=target_country,
+        dense_weight=0.5,
+        sparse_weight=0.3,
+        keyword_weight=0.2,
+        use_reranker=True
     )
-
+    
+    # KR 제외 (target_country가 None인 경우)
+    if not target_country:
+        hybrid_results = [r for r in hybrid_results if r.get('metadata', {}).get('country') != 'KR']
+    
+    # 결과 변환
     results = []
-    for hits in raw:
-        for hit in hits:
-            meta_raw = _hit_field(hit, "metadata", {})
-            meta = _ensure_meta_dict(meta_raw)
-            doc_id = meta.get('doc_id') or meta.get('constitution_doc_id')
+    for item in hybrid_results:
+        meta_raw = item.get('metadata', {})
+        meta = _ensure_meta_dict(meta_raw)
+        doc_id = meta.get('doc_id') or meta.get('constitution_doc_id')
 
-            results.append(
-                ConstitutionArticleResult(
-                    country=meta.get("country"),
-                    country_name=meta.get("country_name"),
-                    constitution_title=meta.get("constitution_title"),
-                    display_path=meta.get("display_path"),
-                    structure={
+        results.append(
+            ConstitutionArticleResult(
+                country=meta.get("country"),
+                country_name=meta.get("country_name"),
+                constitution_title=meta.get("constitution_title"),
+                display_path=meta.get("display_path"),
+                structure={
                     **(meta.get('structure', {}) if isinstance(meta.get('structure', {}), dict) else {}),
                     'doc_id': doc_id
-                    },
-                    english_text=meta.get("english_text"),
-                    korean_text=meta.get("korean_text"),
-                    text_type=meta.get("text_type"),
-                    has_english=bool(meta.get("has_english", False)),
-                    has_korean=bool(meta.get("has_korean", False)),
-                    score=float(getattr(hit, "score", 0.0)),
-                    page=int(meta.get("page", 1) or 1),
-                    page_english=meta.get("page_english"),
-                    page_korean=meta.get("page_korean"),
-                    bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info", []), list) else []
-                )
+                },
+                english_text=meta.get("english_text"),
+                korean_text=meta.get("korean_text"),
+                text_type=meta.get("text_type"),
+                has_english=bool(meta.get("has_english", False)),
+                has_korean=bool(meta.get("has_korean", False)),
+                score=float(item.get('re_score', item.get('fusion_score', item.get('score', 0.0)))),
+                page=int(meta.get("page", 1) or 1),
+                page_english=meta.get("page_english"),
+                page_korean=meta.get("page_korean"),
+                bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else []
             )
+        )
 
     return _dedupe_articles(results)
 
-def _build_pairs(
+def _build_pairs_optimized(
     korean_results: List[ConstitutionArticleResult],
-    foreign_candidates: List[ConstitutionArticleResult],
+    foreign_pool: List[Dict],  # ✅ 원본 하이브리드 검색 결과
     per_country: int,
-    cursor_map: Optional[Dict[str, int]]
+    cursor_map: Optional[Dict[str, int]],
+    use_reranker: bool = True
 ) -> List[ComparativePairResult]:
-
+    """
+    개선된 Pair 생성 - 한국 조항별로 외국 풀에서 매칭
+    
+    Args:
+        korean_results: 검색된 한국 조항들
+        foreign_pool: 전체 외국 조항 풀 (hybrid_search 원본 결과)
+        per_country: 국가당 표시할 조항 수
+        cursor_map: 국가별 페이지 커서
+        use_reranker: 리랭커 사용 여부
+    
+    Returns:
+        Pair 리스트
+    """
+    from app.services.hybrid_search_service import match_foreign_to_korean
+    
     cursor_map = cursor_map or {}
-    by_country = _group_by_country(foreign_candidates)
-
     pairs = []
-
+    
+    # 한국 조항을 Dict 형태로 변환 (매칭 함수용)
+    korean_chunks = []
     for kr in korean_results:
+        korean_chunks.append({
+            'chunk_id': kr.structure.get('doc_id', f"kr_{kr.structure.get('article_number')}"),
+            'chunk': kr.korean_text or kr.english_text or '',
+            'metadata': {
+                'country': kr.country,
+                'article_number': kr.structure.get('article_number'),
+                'display_path': kr.display_path
+            },
+            'original': kr  # 원본 객체 보존
+        })
+    
+    # 각 한국 조항마다 외국 풀에서 유사한 것 매칭
+    matched = match_foreign_to_korean(
+        korean_chunks=korean_chunks,
+        foreign_pool=foreign_pool,
+        top_k_per_korean=50,  # 한국 조항당 외국 후보 50개
+        use_reranker=use_reranker
+    )
+    
+    # Pair 생성
+    for kr_chunk in korean_chunks:
+        kr = kr_chunk['original']
+        kr_id = kr_chunk['chunk_id']
+        
+        # 이 한국 조항에 매칭된 외국 조항들
+        foreign_matches = matched.get(kr_id, [])
+        
+        # 외국 조항을 ConstitutionArticleResult로 변환
+        foreign_articles = []
+        for item in foreign_matches:
+            meta_raw = item.get('metadata', {})
+            meta = _ensure_meta_dict(meta_raw)
+            doc_id = meta.get('doc_id')
+            
+            article = ConstitutionArticleResult(
+                country=meta.get("country", ""),
+                country_name=meta.get("country_name", ""),
+                constitution_title=meta.get("constitution_title", ""),
+                display_path=meta.get("display_path", ""),
+                structure={
+                    **(meta.get('structure', {}) if isinstance(meta.get('structure'), dict) else {}),
+                    'doc_id': doc_id
+                },
+                english_text=meta.get("english_text"),
+                korean_text=meta.get("korean_text"),
+                text_type=meta.get("text_type", "english_only"),
+                has_english=bool(meta.get("has_english", False)),
+                has_korean=bool(meta.get("has_korean", False)),
+                score=float(item.get('re_score', item.get('fusion_score', item.get('score', 0.0)))),
+                page=int(meta.get("page", 1) or 1),
+                page_english=meta.get("page_english"),
+                page_korean=meta.get("page_korean"),
+                bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else []
+            )
+            foreign_articles.append(article)
+        
+        # 중복 제거
+        foreign_articles = _dedupe_articles(foreign_articles)
+        
+        # 국가별 그룹화 및 페이징
+        by_country = _group_by_country(foreign_articles)
+        
         foreign_block = {}
-
         for country, items in by_country.items():
             start = cursor_map.get(country, 0)
             sliced, next_cursor = _paginate(items, start, per_country)
-
+            
             foreign_block[country] = CountryPagedResult(
                 items=sliced,
                 next_cursor=next_cursor
             )
-
+        
         pairs.append(
             ComparativePairResult(
                 korean=kr,
                 foreign=foreign_block
             )
         )
-
+    
     return pairs
-@router.post(
-    "/comparative-search",
-    response_model=ComparativeSearchResponse
-)
+
+@router.post("/comparative-search", response_model=ComparativeSearchResponse)
 async def comparative_search(request: ComparativeSearchRequest):
     import time
     start = time.time()
@@ -1511,28 +1589,44 @@ async def comparative_search(request: ComparativeSearchRequest):
         dim=1024
     )
 
-    # 한국 헌법 (anchor)
+    # 1. 한국 헌법 검색 (1회)
     korean_results = await _search_korean_constitution(
         collection,
         query_embedding,
+        query=request.query,
+        embedding_model=emb_model,
         top_k=request.korean_top_k
     )
     korean_results = _dedupe_articles(korean_results)
 
-    # 외국 헌법 후보 풀
-    foreign_candidates = await _search_foreign_candidate_pool(
-        collection,
-        query_embedding,
-        pool_size=request.foreign_pool_size,
-        target_country=request.target_country
+    # 2. 외국 헌법 풀 검색 (1회) - 원본 Dict 형태로 받기
+    foreign_pool_raw = hybrid_search(
+        query=request.query,
+        collection=collection,
+        embedding_model=emb_model,
+        top_k=request.foreign_pool_size,
+        initial_retrieve=200,
+        country_filter=request.target_country,
+        dense_weight=0.5,
+        sparse_weight=0.3,
+        keyword_weight=0.2,
+        use_reranker=False  # 여기선 리랭킹 안 함 (매칭 시 수행)
     )
+    
+    # KR 제외
+    if not request.target_country:
+        foreign_pool_raw = [
+            r for r in foreign_pool_raw 
+            if r.get('metadata', {}).get('country') != 'KR'
+        ]
 
-    # Pair 생성 (국가별 페이징)
-    pairs = _build_pairs(
+    # 3. Pair 생성 - 한국 조항별 매칭
+    pairs = _build_pairs_optimized(
         korean_results=korean_results,
-        foreign_candidates=foreign_candidates,
+        foreign_pool=foreign_pool_raw,  # 원본 Dict 리스트 전달
         per_country=request.foreign_per_country,
-        cursor_map=request.cursor_map
+        cursor_map=request.cursor_map,
+        use_reranker=True  # 매칭 시 리랭킹
     )
 
     # 요약 (선택)
