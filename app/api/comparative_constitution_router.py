@@ -1642,12 +1642,12 @@ async def comparative_search(request: ComparativeSearchRequest):
         query=request.query,
         collection=collection,
         embedding_model=emb_model,
-        top_k=max(1, request.korean_top_k),
+        top_k=max(1, request.korean_top_k*2),
         initial_retrieve=100,
         country_filter="KR",
         use_reranker=True,
-        score_threshold=0.35,
-        min_results=3,
+        score_threshold=0.0,
+        min_results=1,
         doc_type_filter="constitution",
     )
 
@@ -1685,8 +1685,32 @@ async def comparative_search(request: ComparativeSearchRequest):
             continent=get_continent(meta.get('country', 'KR'))
         )
         korean_results.append(result)
-
-    korean_results = _dedupe_articles(korean_results)
+        KOREAN_SCORE_THRESHOLD = 0.4  # 환경변수로 변경 가능: os.getenv("KOREAN_SCORE_THRESHOLD", "0.4")
+        
+        # score 기준으로 정렬 (높은 순)
+        korean_results = sorted(korean_results, key=lambda x: x.score, reverse=True)
+        
+        # threshold 이상만 필터링
+        filtered_korean = [
+            kr for kr in korean_results 
+            if kr.score >= KOREAN_SCORE_THRESHOLD
+        ]
+        
+        # 필터링 결과가 0개면 최소 1개는 보장
+        if not filtered_korean and korean_results:
+            filtered_korean = korean_results[:1]
+            print(f"[KOREAN_FILTER] 모든 조항이 threshold({KOREAN_SCORE_THRESHOLD}) 미만 - 최고점만 유지: {filtered_korean[0].display_path} (score: {filtered_korean[0].score:.3f})")
+        else:
+            removed_count = len(korean_results) - len(filtered_korean)
+            if removed_count > 0:
+                print(f"[KOREAN_FILTER] {removed_count}개 조항 제거 (threshold: {KOREAN_SCORE_THRESHOLD})")
+                print(f"[KOREAN_FILTER] 유지된 조항: {[kr.display_path for kr in filtered_korean]}")
+                print(f"[KOREAN_FILTER] 점수: {[f'{kr.score:.3f}' for kr in filtered_korean]}")
+        
+        # request.korean_top_k 제한
+        korean_results = filtered_korean[:request.korean_top_k]
+        
+        print(f"[KOREAN_FILTER] 최종 한국 조항 수: {len(korean_results)}")
 
     # ========== 2. 외국 헌법 풀 검색 ==========
     foreign_pool_raw = hybrid_search(
