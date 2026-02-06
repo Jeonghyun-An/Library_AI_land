@@ -639,9 +639,9 @@ class ComparativeConstitutionChunker:
                 center_lines = _words_to_lines(center_w)
 
                 lines = []
-                lines.extend(center_lines)
                 lines.extend(left_lines)
                 lines.extend(right_lines)
+                lines.extend(center_lines)
             else:
                 lines = dict_lines
 
@@ -827,7 +827,34 @@ class ComparativeConstitutionChunker:
                     continue
             cleaned.append(ch)
 
-        return cleaned
+        merged: List[ConstitutionChunk] = []
+        for ch in cleaned:
+            text = (ch.korean_text or ch.english_text or "").strip()
+            has_article = bool((ch.structure or {}).get("article_number"))
+
+            # “조항번호 없는 짧은 청크”면 앞 청크에 흡수
+            if merged and (not has_article) and (len(text) <= 40):
+                prev = merged[-1]
+
+                # 언어 기준으로 자연스럽게 붙이기
+                if ch.korean_text and prev.korean_text:
+                    prev.korean_text = (prev.korean_text.rstrip() + " " + ch.korean_text.lstrip()).strip()
+                    prev.search_text = (prev.search_text.rstrip() + "\n" + ch.korean_text).strip()
+                    continue
+                
+                if ch.english_text and prev.english_text:
+                    prev.english_text = (prev.english_text.rstrip() + " " + ch.english_text.lstrip()).strip()
+                    prev.search_text = (prev.search_text.rstrip() + "\n" + ch.english_text).strip()
+                    continue
+                
+                # prev에 해당 언어가 없으면 그냥 search_text에만이라도 합치고 drop
+                prev.search_text = (prev.search_text.rstrip() + "\n" + text).strip()
+                continue
+            
+            merged.append(ch)
+
+        return merged
+
 
 
 def chunk_constitution_document(
