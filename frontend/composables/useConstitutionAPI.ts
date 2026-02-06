@@ -24,6 +24,7 @@ export const useConstitutionAPI = () => {
   const comparativeSearch = async (params: {
     query: string;
     korean_top_k?: number;
+    korean_score_threshold?: number;
     foreign_per_country?: number;
     foreign_pool_size?: number;
     target_country?: string;
@@ -38,6 +39,7 @@ export const useConstitutionAPI = () => {
           body: {
             query: params.query,
             korean_top_k: params.korean_top_k ?? 3,
+            korean_score_threshold: params.korean_score_threshold ?? 0.4,
             foreign_per_country: params.foreign_per_country ?? 3,
             foreign_pool_size: params.foreign_pool_size ?? 50,
             target_country: params.target_country,
