@@ -278,7 +278,7 @@ def hybrid_search(
         dense_hits = collection.search(
             data=[q_emb.tolist()],
             anns_field="embedding",
-            param={"metric_type": METRIC, "params": {"ef": 64}},
+            param={"metric_type": METRIC, "params": {"ef": 250}},
             limit=initial_retrieve,
             expr=expr,
             output_fields=["doc_id", "chunk_text", "metadata"],
