@@ -630,8 +630,8 @@
                           {{ result.korean_text || result.english_text }}
                         </div>
                         <div class="result_meta">
-                          유사도: {{ (result.score * 100).toFixed(1) }}% |
-                          페이지: {{ result.page }}
+                          유사도: {{ (result.display_score * 100).toFixed(1) }}%
+                          | 페이지: {{ result.page }}
                         </div>
                       </div>
                       <div
@@ -668,7 +668,7 @@
                       <div class="pdf_results_title">검색 결과</div>
                       <div
                         v-for="(result, idx) in displayedForeignResults"
-                        :key="`foreign-${idx}`"
+                        :key="`${result.structure?.doc_id || result.doc_id || result.metadata?.doc_id}-${result.page}-${result.structure?.article_number || result.structure?.article_no || idx}`"
                         class="pdf_result_item"
                         :class="{ active: foreignPdfPage === result.page }"
                         @click="loadForeignPdf(result)"
@@ -697,8 +697,8 @@
                           </div>
                         </div>
                         <div class="result_meta">
-                          유사도: {{ (result.score * 100).toFixed(1) }}% |
-                          페이지: {{ result.page }}
+                          유사도: {{ (result.display_score * 100).toFixed(1) }}%
+                          | 페이지: {{ result.page }}
                         </div>
                       </div>
                       <div
@@ -813,7 +813,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
+import {
+  ref,
+  computed,
+  onMounted,
+  onBeforeUnmount,
+  nextTick,
+  watch,
+} from "vue";
 
 definePageMeta({
   layout: false,
@@ -929,6 +936,20 @@ async function selectKoreanMatch(index, koreanItem) {
 
   // - 선택된 외국 국가가 현재 pair에 없으면 첫 국가로 교체
   await nextTick();
+  console.log("KR index:", index);
+  console.log(
+    "Foreign keys:",
+    Object.keys(foreignResultsByCountry.value || {}),
+  );
+  console.log(
+    "Foreign first item per country:",
+    Object.fromEntries(
+      Object.entries(foreignResultsByCountry.value || {}).map(([k, v]) => [
+        k,
+        v?.items?.[0]?.structure?.article_number || v?.items?.[0]?.page,
+      ]),
+    ),
+  );
 
   // 한국 PDF는 클릭한 항목으로 이동
   if (koreanItem) {
@@ -973,12 +994,6 @@ const koreanResults = computed(() => {
 
   // 모든 pairs에서 korean 결과 추출
   const results = searchResult.value.pairs.map((pair) => pair.korean);
-
-  if (results.length > 0 && results[0]) {
-    nextTick(() => {
-      loadKoreanPdf(results[0]);
-    });
-  }
 
   return results;
 });
@@ -1037,13 +1052,6 @@ const displayedForeignResults = computed(() => {
     foreignResultsByCountry.value[selectedForeignCountry.value];
   const results = countryData?.items || [];
 
-  // 기존 동작 유지: 첫 결과 자동 로드
-  if (results.length > 0 && results[0]) {
-    nextTick(() => {
-      loadForeignPdf(results[0]);
-    });
-  }
-
   return results;
 });
 
@@ -1057,6 +1065,37 @@ const selectedCountryName = computed(() => {
 function getCountriesByContinent(continent) {
   return continentsWithCountries.value[continent] || [];
 }
+watch(
+  [() => selectedKoreanIndex.value, () => searchResult.value],
+  async () => {
+    if (!searchResult.value) return;
+
+    // 새 pair 기준 국가 리스트
+    const list = foreignCountries.value;
+    if (!list.length) {
+      selectedForeignCountry.value = null;
+      selectedContinent.value = "korea";
+      foreignPdfUrl.value = null;
+      return;
+    }
+
+    // 현재 선택 국가가 새 pair에 없으면 첫 국가로 교체
+    const cur = selectedForeignCountry.value;
+    const nextCode = list.some((c) => c.code === cur) ? cur : list[0].code;
+
+    if (selectedForeignCountry.value !== nextCode) {
+      selectedForeignCountry.value = nextCode;
+    }
+    selectedContinent.value =
+      list.find((c) => c.code === nextCode)?.continent || "asia";
+
+    // 외국 PDF도 새 pair의 첫 결과로 갱신
+    await nextTick();
+    const items = foreignResultsByCountry.value?.[nextCode]?.items || [];
+    if (items[0]) await loadForeignPdf(items[0]);
+  },
+  { immediate: false, flush: "post" },
+);
 
 // ==================== API 호출 ====================
 async function handleSearch() {
@@ -1072,8 +1111,8 @@ async function handleSearch() {
 
     const response = await comparativeSearch({
       query: searchQuery.value,
-      korean_top_k: 3,
-      foreign_per_country: 3,
+      korean_top_k: 8,
+      foreign_per_country: 8,
       foreign_pool_size: 50,
       generate_summary: true,
     });
