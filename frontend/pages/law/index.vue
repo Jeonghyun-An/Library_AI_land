@@ -574,7 +574,7 @@
                         href="#;"
                         class="sc_menu_item"
                         :class="{ on: selectedForeignCountry === country.code }"
-                        @click.prevent="selectedForeignCountry = country.code"
+                        @click.prevent="selectForeignCountry(country.code)"
                       >
                         <span class="txt_underline">
                           <span class="inn_txt">{{ country.name }}</span>
@@ -614,7 +614,7 @@
                         v-for="(result, idx) in koreanResults"
                         :key="`kr-${idx}`"
                         class="pdf_result_item"
-                        :class="{ active: koreanPdfPage === result.page }"
+                        :class="{ active: selectedKoreanIndex === idx }"
                         @click="selectKoreanMatch(idx, result)"
                       >
                         <div class="result_article">
@@ -866,7 +866,7 @@ const koreanPdfPage = ref(1);
 const foreignPdfPage = ref(1);
 
 const _lastKorean = ref({ docId: null, page: null });
-const _lastForeign = ref({ docId: null, page: null });
+const _lastForeign = ref({ docId: null, page: null, koreanIndex: null });
 
 // ==================== PDF 로드 및 페이지 이동 ====================
 async function loadKoreanPdf(result) {
@@ -897,7 +897,26 @@ async function loadKoreanPdf(result) {
 }
 
 async function loadForeignPdf(result) {
-  if (!result) return;
+  console.log(`[loadForeignPdf] 시작:`, {
+    result: result
+      ? {
+          country: result.country,
+          article: result.structure?.article_number,
+          page: result.page,
+          doc_id:
+            result.doc_id ||
+            result.structure?.doc_id ||
+            result.metadata?.doc_id,
+        }
+      : null,
+    _lastForeign: _lastForeign.value,
+    currentKoreanIndex: selectedKoreanIndex.value,
+  });
+
+  if (!result) {
+    console.error(` [loadForeignPdf] result가 null 또는 undefined`);
+    return;
+  }
 
   let docId =
     result.doc_id || result.structure?.doc_id || result.metadata?.doc_id;
@@ -906,18 +925,46 @@ async function loadForeignPdf(result) {
     const country = result.country;
     const version = result.structure?.version || "latest";
     docId = `${country}_latest`;
-    console.warn(`외국 헌법 doc_id 추정: ${docId}`);
+    console.warn(` [loadForeignPdf] doc_id 없음 - 추정: ${docId}`);
   }
 
   const page = result.page || 1;
+  const currentKoreanIndex = selectedKoreanIndex.value;
 
-  if (_lastForeign.value.docId === docId && _lastForeign.value.page === page) {
+  console.log(` [loadForeignPdf] 중복 체크:`, {
+    docId,
+    page,
+    koreanIndex: currentKoreanIndex,
+    last: _lastForeign.value,
+    willSkip:
+      _lastForeign.value.docId === docId &&
+      _lastForeign.value.page === page &&
+      _lastForeign.value.koreanIndex === currentKoreanIndex,
+  });
+
+  //  핵심 수정: 한국 조항 인덱스도 함께 체크
+  if (
+    _lastForeign.value.docId === docId &&
+    _lastForeign.value.page === page &&
+    _lastForeign.value.koreanIndex === currentKoreanIndex
+  ) {
+    console.log(
+      ` [loadForeignPdf] 완전 중복 - 스킵 (같은 한국 조항 + 같은 외국 PDF)`,
+    );
     return;
   }
-  _lastForeign.value = { docId, page };
+
+  _lastForeign.value = { docId, page, koreanIndex: currentKoreanIndex };
 
   foreignPdfUrl.value = getPdfDownloadUrl(docId, true);
   foreignPdfPage.value = page;
+
+  console.log(` [loadForeignPdf] PDF 로드 완료:`, {
+    docId,
+    page,
+    koreanIndex: currentKoreanIndex,
+    pdfUrl: foreignPdfUrl.value,
+  });
 
   await nextTick();
   scrollToPdfPage("foreign-pdf-viewer", page);
@@ -932,47 +979,112 @@ function scrollToPdfPage(viewerId, pageNumber) {
 }
 
 async function selectKoreanMatch(index, koreanItem) {
+  console.log(` [selectKoreanMatch] 시작: index=${index}`, {
+    article: koreanItem?.structure?.article_number,
+    currentForeignCountry: selectedForeignCountry.value,
+  });
+
+  // 1. 한국 조항 인덱스 변경 → foreignResultsByCountry computed 자동 갱신됨
   selectedKoreanIndex.value = index;
 
-  // - 선택된 외국 국가가 현재 pair에 없으면 첫 국가로 교체
-  await nextTick();
-  console.log("KR index:", index);
-  console.log(
-    "Foreign keys:",
-    Object.keys(foreignResultsByCountry.value || {}),
-  );
-  console.log(
-    "Foreign first item per country:",
-    Object.fromEntries(
-      Object.entries(foreignResultsByCountry.value || {}).map(([k, v]) => [
-        k,
-        v?.items?.[0]?.structure?.article_number || v?.items?.[0]?.page,
-      ]),
-    ),
-  );
-
-  // 한국 PDF는 클릭한 항목으로 이동
+  // 2. 한국 PDF 로드
   if (koreanItem) {
     await loadKoreanPdf(koreanItem);
   }
 
-  const codes = Object.keys(foreignResultsByCountry.value || {});
-  if (!codes.length) {
+  // 3. nextTick으로 computed 갱신 완료 대기
+  await nextTick();
+
+  // 4. 새로운 pair의 외국 국가 목록 확인
+  const newForeignCountries = Object.keys(foreignResultsByCountry.value || {});
+
+  console.log(` [selectKoreanMatch] 새 pair 분석:`, {
+    newCountries: newForeignCountries,
+    foreignResultsByCountry: Object.keys(
+      foreignResultsByCountry.value || {},
+    ).map((code) => ({
+      code,
+      itemCount: foreignResultsByCountry.value[code]?.items?.length || 0,
+    })),
+  });
+
+  if (newForeignCountries.length === 0) {
+    // 외국 조항이 없으면 한국으로 돌아감
+    console.log(` [selectKoreanMatch] 외국 조항 없음 - 한국만 표시`);
     selectedForeignCountry.value = null;
     selectedContinent.value = "korea";
+    foreignPdfUrl.value = null;
     return;
   }
 
-  // 현재 선택 국가가 없거나, 이번 pair에 없으면 첫 국가로
-  if (
-    !selectedForeignCountry.value ||
-    !foreignResultsByCountry.value[selectedForeignCountry.value]
-  ) {
+  // 5. 현재 선택된 국가가 새 pair에 있는지 확인
+  const currentCountryStillValid =
+    selectedForeignCountry.value &&
+    newForeignCountries.includes(selectedForeignCountry.value);
+
+  console.log(` [selectKoreanMatch] 국가 유효성 체크:`, {
+    currentCountry: selectedForeignCountry.value,
+    stillValid: currentCountryStillValid,
+  });
+
+  if (!currentCountryStillValid) {
+    // 6. 없으면 첫 번째 국가로 변경
     const firstCountry = foreignCountries.value[0];
     if (firstCountry) {
+      console.log(
+        ` [selectKoreanMatch] 외국 국가 변경: ${selectedForeignCountry.value} → ${firstCountry.code}`,
+      );
       selectedForeignCountry.value = firstCountry.code;
       selectedContinent.value = firstCountry.continent;
     }
+  } else {
+    console.log(
+      ` [selectKoreanMatch] 외국 국가 유지: ${selectedForeignCountry.value}`,
+    );
+  }
+
+  //  7. 외국 PDF 항상 새로 로드 (국가가 유지되어도 pair가 바뀌었으므로!)
+  await nextTick();
+  const foreignResults = displayedForeignResults.value;
+  console.log(` [selectKoreanMatch] displayedForeignResults:`, {
+    selectedCountry: selectedForeignCountry.value,
+    resultCount: foreignResults.length,
+    firstResult: foreignResults[0]
+      ? {
+          country: foreignResults[0].country,
+          article: foreignResults[0].structure?.article_number,
+          page: foreignResults[0].page,
+          doc_id:
+            foreignResults[0].doc_id || foreignResults[0].structure?.doc_id,
+        }
+      : null,
+  });
+
+  if (foreignResults.length > 0) {
+    const firstResult = foreignResults[0];
+    console.log(` [selectKoreanMatch] 외국 PDF 로드 실행`);
+    await loadForeignPdf(firstResult);
+  } else {
+    console.error(` [selectKoreanMatch] displayedForeignResults가 비어있음!`);
+  }
+}
+
+//  새 함수: 외국 국가 선택 시 PDF 로드
+async function selectForeignCountry(countryCode) {
+  console.log(` 외국 국가 선택: ${countryCode}`);
+
+  selectedForeignCountry.value = countryCode;
+
+  const country = foreignCountries.value.find((c) => c.code === countryCode);
+  if (country) {
+    selectedContinent.value = country.continent;
+  }
+
+  // 해당 국가의 첫 번째 결과 로드
+  await nextTick();
+  const firstResult = displayedForeignResults.value[0];
+  if (firstResult) {
+    await loadForeignPdf(firstResult);
   }
 }
 
@@ -998,12 +1110,36 @@ const koreanResults = computed(() => {
   return results;
 });
 
-// 핵심: foreign는 “첫 pair 고정”이 아니라 “selectedKoreanIndex 기준 pair”
 const foreignResultsByCountry = computed(() => {
   const pairs = searchResult.value?.pairs || [];
   const pair = pairs[selectedKoreanIndex.value];
-  if (!pair) return {};
-  return pair.foreign || {};
+
+  console.log(` [foreignResultsByCountry] computed 실행:`, {
+    selectedKoreanIndex: selectedKoreanIndex.value,
+    totalPairs: pairs.length,
+    currentPair: pair
+      ? {
+          korean_article: pair.korean?.structure?.article_number,
+          foreign_countries: Object.keys(pair.foreign || {}),
+        }
+      : null,
+  });
+
+  if (!pair) {
+    console.log(` [foreignResultsByCountry] pair 없음 - 빈 객체 반환`);
+    return {};
+  }
+
+  const foreign = pair.foreign || {};
+  console.log(` [foreignResultsByCountry] 결과:`, {
+    countries: Object.keys(foreign),
+    itemCounts: Object.entries(foreign).map(([code, data]) => ({
+      code,
+      count: data?.items?.length || 0,
+    })),
+  });
+
+  return foreign;
 });
 
 const foreignCountries = computed(() => {
@@ -1044,13 +1180,34 @@ const availableContinents = computed(() => {
 });
 
 const displayedForeignResults = computed(() => {
+  console.log(` [displayedForeignResults] computed 실행:`, {
+    selectedForeignCountry: selectedForeignCountry.value,
+    selectedKoreanIndex: selectedKoreanIndex.value,
+    foreignResultsByCountryKeys: Object.keys(
+      foreignResultsByCountry.value || {},
+    ),
+  });
+
   if (!selectedForeignCountry.value) {
+    console.log(` [displayedForeignResults] 국가 미선택 - 빈 배열 반환`);
     return [];
   }
 
   const countryData =
     foreignResultsByCountry.value[selectedForeignCountry.value];
   const results = countryData?.items || [];
+
+  console.log(` [displayedForeignResults] 결과:`, {
+    country: selectedForeignCountry.value,
+    itemCount: results.length,
+    firstItem: results[0]
+      ? {
+          article: results[0].structure?.article_number,
+          page: results[0].page,
+          doc_id: results[0].doc_id || results[0].structure?.doc_id,
+        }
+      : null,
+  });
 
   return results;
 });
@@ -1065,37 +1222,6 @@ const selectedCountryName = computed(() => {
 function getCountriesByContinent(continent) {
   return continentsWithCountries.value[continent] || [];
 }
-watch(
-  [() => selectedKoreanIndex.value, () => searchResult.value],
-  async () => {
-    if (!searchResult.value) return;
-
-    // 새 pair 기준 국가 리스트
-    const list = foreignCountries.value;
-    if (!list.length) {
-      selectedForeignCountry.value = null;
-      selectedContinent.value = "korea";
-      foreignPdfUrl.value = null;
-      return;
-    }
-
-    // 현재 선택 국가가 새 pair에 없으면 첫 국가로 교체
-    const cur = selectedForeignCountry.value;
-    const nextCode = list.some((c) => c.code === cur) ? cur : list[0].code;
-
-    if (selectedForeignCountry.value !== nextCode) {
-      selectedForeignCountry.value = nextCode;
-    }
-    selectedContinent.value =
-      list.find((c) => c.code === nextCode)?.continent || "asia";
-
-    // 외국 PDF도 새 pair의 첫 결과로 갱신
-    await nextTick();
-    const items = foreignResultsByCountry.value?.[nextCode]?.items || [];
-    if (items[0]) await loadForeignPdf(items[0]);
-  },
-  { immediate: false, flush: "post" },
-);
 
 // ==================== API 호출 ====================
 async function handleSearch() {
@@ -1106,7 +1232,7 @@ async function handleSearch() {
   isSearching.value = true;
 
   try {
-    // 검색 시작 시 anchor 초기화 (기능 변경 아님)
+    // 검색 시작 시 anchor 초기화
     selectedKoreanIndex.value = 0;
 
     const response = await comparativeSearch({
@@ -1120,15 +1246,30 @@ async function handleSearch() {
     searchResult.value = response;
     addToHistory(searchQuery.value);
 
-    // 기존 동작 유지: 첫 국가 자동 선택
+    // 첫 국가 자동 선택
     await nextTick();
     if (foreignCountries.value.length > 0) {
       const firstCountry = foreignCountries.value[0];
       selectedForeignCountry.value = firstCountry.code;
       selectedContinent.value = firstCountry.continent;
+
+      // 첫 번째 한국 조항과 외국 조항 자동 로드
+      if (koreanResults.value.length > 0) {
+        await loadKoreanPdf(koreanResults.value[0]);
+      }
+
+      const firstForeignResult = displayedForeignResults.value[0];
+      if (firstForeignResult) {
+        await loadForeignPdf(firstForeignResult);
+      }
     } else {
       selectedContinent.value = "korea";
       selectedForeignCountry.value = null;
+
+      // 한국 조항만 로드
+      if (koreanResults.value.length > 0) {
+        await loadKoreanPdf(koreanResults.value[0]);
+      }
     }
   } catch (error) {
     console.error("검색 실패:", error);
