@@ -203,7 +203,27 @@ class ComparativeSummaryResponse(BaseModel):
     summary: str
     prompt_chars: int
     llm_time_ms: float
+    
+class CountrySummaryRequest(BaseModel):
+    """특정 국가와 한국 헌법 비교 요약 요청"""
+    query: str = Field(..., description="검색 쿼리")
+    korean_items: List[ConstitutionArticleResult] = Field(..., description="한국 헌법 조항 리스트")
+    foreign_country: str = Field(..., description="비교할 국가 코드 (예: AE, US)")
+    foreign_items: List[ConstitutionArticleResult] = Field(..., description="외국 헌법 조항 리스트")
+    max_tokens: int = Field(800, ge=100, le=2000)
+    temperature: float = Field(0.3, ge=0.0, le=1.5)
 
+
+class CountrySummaryResponse(BaseModel):
+    """특정 국가 비교 요약 응답"""
+    query: str
+    korean_count: int
+    foreign_country: str
+    foreign_country_name: str
+    foreign_count: int
+    summary: str
+    prompt_chars: int
+    llm_time_ms: float
 
 # ==================== 유틸함수 ====================
 def _dedupe_articles(items: List[ConstitutionArticleResult]) -> List[ConstitutionArticleResult]:
@@ -2083,6 +2103,211 @@ async def comparative_summary(req: ComparativeSummaryRequest):
     except Exception as e:
         print(f"[PAIR-SUMMARY] Error: {e}")
         raise HTTPException(500, f"pair 요약 생성 실패: {e}")
+    
+# -------------------- Route: /country-summary --------------------
+@router.post(
+    "/country-summary",
+    response_model=CountrySummaryResponse,
+    summary="특정 국가와 한국 헌법 전체 비교 요약",
+    description="""
+    프론트에서 특정 국가를 클릭할 때마다 호출
+    
+    - 한국 헌법 청크 전체 (예: 3개)
+    - 선택한 국가의 헌법 청크 전체 (예: 5개)
+    - 모든 조합을 비교하여 종합 요약 생성
+    
+    예시:
+    - 아랍에미리트 클릭 → 한국 3개 vs 에미레이트 5개 전체 비교
+    - 미국 클릭 → 한국 3개 vs 미국 4개 전체 비교
+    """
+)
+async def country_summary(req: CountrySummaryRequest):
+    """
+    특정 국가와 한국 헌법의 모든 청크를 비교하여 요약 생성
+    """
+    try:
+        # 기본 검증
+        if not req.korean_items:
+            raise HTTPException(400, "korean_items가 비어있습니다.")
+        if not req.foreign_items:
+            raise HTTPException(400, "foreign_items가 비어있습니다.")
+        
+        print(f"[COUNTRY-SUMMARY] 시작: {req.foreign_country}")
+        print(f"[COUNTRY-SUMMARY] 한국 청크: {len(req.korean_items)}개")
+        print(f"[COUNTRY-SUMMARY] 외국 청크: {len(req.foreign_items)}개")
+        
+        # 국가 정보 조회
+        from app.services.country_registry import get_country
+        try:
+            country_info = get_country(req.foreign_country)
+            foreign_country_name = country_info.name_ko
+        except:
+            foreign_country_name = req.foreign_country
+        
+        # 캐시 키 생성
+        cache_key = _make_country_summary_cache_key(req)
+        cached = _cache_get(cache_key)
+        if cached:
+            print(f"[COUNTRY-SUMMARY] 캐시 히트")
+            return CountrySummaryResponse(
+                query=req.query,
+                korean_count=len(req.korean_items),
+                foreign_country=req.foreign_country,
+                foreign_country_name=foreign_country_name,
+                foreign_count=len(req.foreign_items),
+                summary=cached,
+                prompt_chars=0,
+                llm_time_ms=0.0
+            )
+        
+        # 프롬프트 생성
+        prompt = build_country_summary_prompt(
+            query=req.query,
+            korean_items=req.korean_items,
+            foreign_country=req.foreign_country,
+            foreign_country_name=foreign_country_name,
+            foreign_items=req.foreign_items
+        )
+        
+        prompt_len = len(prompt)
+        print(f"[COUNTRY-SUMMARY] 프롬프트 길이: {prompt_len} chars (~{prompt_len//4} tokens)")
+        
+        # LLM 호출
+        t0 = time.time()
+        summary = await _call_vllm_completion(
+            prompt=prompt,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature
+        )
+        t_ms = (time.time() - t0) * 1000.0
+        
+        if not summary:
+            raise HTTPException(500, "LLM이 빈 요약을 반환했습니다.")
+        
+        # 캐시 저장
+        _cache_set(cache_key, summary)
+        
+        print(f"[COUNTRY-SUMMARY] 완료: {len(summary)} chars, {t_ms:.0f}ms")
+        
+        return CountrySummaryResponse(
+            query=req.query,
+            korean_count=len(req.korean_items),
+            foreign_country=req.foreign_country,
+            foreign_country_name=foreign_country_name,
+            foreign_count=len(req.foreign_items),
+            summary=summary,
+            prompt_chars=prompt_len,
+            llm_time_ms=t_ms
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[COUNTRY-SUMMARY] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"국가별 요약 생성 실패: {e}")
+
+
+def build_country_summary_prompt(
+    query: str,
+    korean_items: List[ConstitutionArticleResult],
+    foreign_country: str,
+    foreign_country_name: str,
+    foreign_items: List[ConstitutionArticleResult]
+) -> str:
+    """
+    한국 전체 vs 특정 국가 전체 비교 프롬프트 생성
+    """
+    
+    def _clean_text(s: Optional[str], limit: int = 300) -> str:
+        if not s:
+            return ""
+        s = s.strip()
+        if len(s) <= limit:
+            return s
+        return s[:limit] + "...[생략]"
+    
+    def _format_item(item: ConstitutionArticleResult, limit: int = 300) -> str:
+        st = item.structure or {}
+        article = st.get("article_number")
+        article_str = f"제{article}조" if article else item.display_path
+        
+        text = _clean_text(
+            item.korean_text or item.english_text or "",
+            limit=limit
+        )
+        
+        return f"### {article_str}\n{text}"
+    
+    # 한국 조항들
+    korean_blocks = []
+    for item in korean_items:
+        korean_blocks.append(_format_item(item, limit=350))
+    
+    korean_section = "\n\n".join(korean_blocks)
+    
+    # 외국 조항들
+    foreign_blocks = []
+    for item in foreign_items:
+        foreign_blocks.append(_format_item(item, limit=350))
+    
+    foreign_section = "\n\n".join(foreign_blocks)
+    
+    prompt = f"""당신은 헌법 비교 전문가입니다.
+
+**쿼리**: "{query}"
+
+아래 한국 헌법 조항들과 {foreign_country_name} 헌법 조항들을 비교하여 종합 요약을 작성하세요.
+
+## 한국 헌법 ({len(korean_items)}개 조항)
+
+{korean_section}
+
+## {foreign_country_name} 헌법 ({len(foreign_items)}개 조항)
+
+{foreign_section}
+
+---
+
+**요구사항**:
+1. 위에 제공된 모든 조항을 검토하여 비교
+2. 쿼리 "{query}" 관점에서 주요 공통점과 차이점 분석
+3. 각 국가의 특징적인 규정 명시
+4. 5~8문장으로 작성
+5. 조항 번호를 명시하며 구체적으로 설명
+6. 불릿 포인트 없이 문장으로만 작성
+
+**출력**:"""
+    
+    return prompt
+
+
+def _make_country_summary_cache_key(req: CountrySummaryRequest) -> str:
+    """국가별 요약 캐시 키 생성"""
+    
+    # 한국 조항 식별자
+    korean_ids = [
+        f"{item.structure.get('article_number', item.display_path)}"
+        for item in req.korean_items
+    ]
+    
+    # 외국 조항 식별자
+    foreign_ids = [
+        f"{item.structure.get('article_number', item.display_path)}"
+        for item in req.foreign_items
+    ]
+    
+    payload = {
+        "q": req.query,
+        "kr": sorted(korean_ids),
+        "country": req.foreign_country,
+        "fx": sorted(foreign_ids)
+    }
+    
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    h = hashlib.sha256(raw).hexdigest()[:16]
+    return f"country_summary:{h}"
     
 @router.post(
     "/comparative-match",

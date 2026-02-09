@@ -97,6 +97,33 @@ export const useConstitutionAPI = () => {
     }
   };
 
+  const generateCountrySummary = async (params: {
+    query: string;
+    korean_items: any[];
+    foreign_country: string;
+    foreign_items: any[];
+    max_tokens?: number;
+    temperature?: number;
+  }) => {
+    try {
+      const response = await $fetch(`${apiBase}/constitution/country-summary`, {
+        method: "POST",
+        body: {
+          query: params.query,
+          korean_items: params.korean_items,
+          foreign_country: params.foreign_country,
+          foreign_items: params.foreign_items,
+          max_tokens: params.max_tokens ?? 800,
+          temperature: params.temperature ?? 0.3,
+        },
+      });
+      return response;
+    } catch (error: any) {
+      console.error("[API] 국가 요약 실패:", error);
+      throw error;
+    }
+  };
+
   /**
    * 헌법 문서 업로드
    *
@@ -344,6 +371,7 @@ export const useConstitutionAPI = () => {
     // 검색
     comparativeSearch,
     generatePairSummary,
+    generateCountrySummary,
     matchForeign,
 
     // 업로드/삭제
