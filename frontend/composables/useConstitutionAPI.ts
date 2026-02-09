@@ -38,9 +38,9 @@ export const useConstitutionAPI = () => {
           method: "POST",
           body: {
             query: params.query,
-            korean_top_k: params.korean_top_k ?? 3,
-            korean_score_threshold: params.korean_score_threshold ?? 0.4,
-            foreign_per_country: params.foreign_per_country ?? 3,
+            korean_top_k: params.korean_top_k ?? 5,
+            korean_score_threshold: params.korean_score_threshold ?? 0.2,
+            foreign_per_country: params.foreign_per_country ?? 8,
             foreign_pool_size: params.foreign_pool_size ?? 50,
             target_country: params.target_country,
             cursor_map: params.cursor_map,

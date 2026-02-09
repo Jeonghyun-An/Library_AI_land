@@ -1243,6 +1243,28 @@ async function handleSearch() {
       generate_summary: true,
     });
 
+    console.log(`📦 [handleSearch] ==========  API 응답 =========`);
+    console.log(`📦 [handleSearch] pairs 개수:`, response.pairs?.length);
+
+    response.pairs?.forEach((pair, idx) => {
+      const foreignCountries = Object.keys(pair.foreign || {});
+      const itemCounts = Object.entries(pair.foreign || {}).map(
+        ([code, data]) => ({
+          code,
+          count: data.items?.length || 0,
+          firstArticle: data.items?.[0]?.structure?.article_number,
+        }),
+      );
+
+      console.log(`📦 [handleSearch] Pair ${idx}:`, {
+        korean:
+          pair.korean?.structure?.article_number || pair.korean?.display_path,
+        foreign_count: foreignCountries.length,
+        foreign_countries: foreignCountries,
+        details: itemCounts,
+      });
+    });
+    console.log(`📦 [handleSearch] =============================`);
     searchResult.value = response;
     addToHistory(searchQuery.value);
 

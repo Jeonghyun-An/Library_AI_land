@@ -145,7 +145,7 @@ class ConstitutionUploadRequest(BaseModel):
 class ComparativeSearchRequest(BaseModel):
     query: str
     korean_top_k: int = 3
-    korean_score_threshold: float = 0.4
+    korean_score_threshold: float = 0.2
     foreign_per_country: int = 3   # 국가당 처음 보여줄 조항 수
     foreign_pool_size: int = 50    # 국가별 후보 풀
     target_country: Optional[str] = None
@@ -1686,7 +1686,7 @@ async def comparative_search(request: ComparativeSearchRequest):
             continent=get_continent(meta.get('country', 'KR'))
         )
         korean_results.append(result)
-        KOREAN_SCORE_THRESHOLD = float(os.getenv("KOREAN_SCORE_THRESHOLD", "0.4"))
+        KOREAN_SCORE_THRESHOLD = float(os.getenv("KOREAN_SCORE_THRESHOLD", "0.2"))
         
         # score 기준으로 정렬 (높은 순)
         korean_results = sorted(korean_results, key=lambda x: x.score, reverse=True)
