@@ -22,6 +22,7 @@ import httpx
 from pydantic import BaseModel, Field
 import fitz  # PyMuPDF
 
+from app.services.country_registry import Country
 from app.services.embedding_model import get_embedding_model
 from app.services.milvus_service import get_milvus_client, get_collection
 from app.services.minio_service import get_minio_client
@@ -1906,7 +1907,7 @@ def build_pair_summary_prompt(
 1) 외부 지식/추측 금지. 아래 제공된 텍스트 밖의 내용은 말하지 마세요.
 2) 현재 제공된 조항들만 비교하세요. 다른 조항을 끌어오지 마세요.
 3) 반드시 "한국: {kr_path} {kr_article}" 와
-   외국은 국가별로 "{country} + 조항/경로" 를 명시해서 비교하세요.
+   외국은 국가별로 "{Country} + 조항/경로" 를 명시해서 비교하세요.
 4) 결과는 3~5문장. 각 문장은 정보 밀도가 높게.
 5) 공통점(1~2문장) + 차이점(1~2문장) + 주의/요약(선택 1문장) 구조 권장.
 6) 법률 용어는 중립적으로, 과장/평가/정치적 판단 금지.
