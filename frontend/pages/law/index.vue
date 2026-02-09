@@ -557,18 +557,16 @@
                 </div>
 
                 <div class="sc_tab_con_wrap">
-                  <!-- 대한민국 (항상 표시) -->
+                  <!-- 대한민국 (항상 표시, 선택 불가) -->
                   <div
                     class="sc_menu_wrap"
                     :class="{ on: selectedContinent === 'korea' }"
                     id="panel_korea"
                   >
                     <div class="sc_menu">
-                      <a
-                        href="#;"
+                      <div
                         class="sc_menu_item"
                         :class="{ on: !selectedForeignCountry }"
-                        @click.prevent="selectedForeignCountry = null"
                       >
                         <span class="inn_txt">대한민국</span>
                         <span class="flag">
@@ -578,7 +576,7 @@
                             @error="handleFlagError"
                           />
                         </span>
-                      </a>
+                      </div>
                     </div>
                   </div>
 
