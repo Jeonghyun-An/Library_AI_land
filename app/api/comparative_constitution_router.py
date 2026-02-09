@@ -2214,74 +2214,96 @@ def build_country_summary_prompt(
     korean_items: List[ConstitutionArticleResult],
     foreign_country: str,
     foreign_country_name: str,
-    foreign_items: List[ConstitutionArticleResult]
+    foreign_items: List[ConstitutionArticleResult],
 ) -> str:
     """
-    한국 전체 vs 특정 국가 전체 비교 프롬프트 생성
+    한국 전체 vs 특정 국가 전체 비교 프롬프트 생성 (HARDENED)
+
+    목표:
+    - 메타 문구/구분선/라벨(요청하신..., --- 등) 출력 방지
+    - 제공된 텍스트 밖 정보/조항번호 환각 방지
+    - 문장 끝 근거 태그 강제 (KR: / FX:)
+    - KR/FX 헤더 prefix로 국가 구분 강화
     """
-    
-    def _clean_text(s: Optional[str], limit: int = 300) -> str:
+
+    def _clean_text(s: Optional[str], limit: int = 320) -> str:
         if not s:
             return ""
         s = s.strip()
         if len(s) <= limit:
             return s
-        return s[:limit] + "...[생략]"
-    
-    def _format_item(item: ConstitutionArticleResult, limit: int = 300) -> str:
+        return s[:limit] + "...[TRUNCATED]"
+
+    def _pick_article_label(item: ConstitutionArticleResult) -> str:
+        """
+        item.structure.article_number가 있으면 우선 사용.
+        없으면 display_path를 사용.
+        """
         st = item.structure or {}
         article = st.get("article_number")
-        article_str = f"제{article}조" if article else item.display_path
-        
-        text = _clean_text(
-            item.korean_text or item.english_text or "",
-            limit=limit
-        )
-        
-        return f"### {article_str}\n{text}"
-    
+        if article:
+            # 숫자/문자 모두 가능하게 str 처리
+            return f"{article}".strip()
+        return (item.display_path or "unknown").strip()
+
+    def _format_item(item: ConstitutionArticleResult, prefix: str, limit: int = 320) -> str:
+        """
+        prefix: 'KR' or 'FX'
+        """
+        label_raw = _pick_article_label(item)
+
+        # 숫자처럼 보이면 한국은 '제N조', 외국은 'Article N' 느낌을 주되,
+        # display_path 기반인 경우는 원문을 유지(환각 방지).
+        label_norm = label_raw
+        if label_raw.isdigit():
+            if prefix == "KR":
+                label_norm = f"제{label_raw}조"
+            else:
+                label_norm = f"Article {label_raw}"
+
+        text = _clean_text(item.korean_text or item.english_text or "", limit=limit)
+        # 텍스트가 비어있을 때도 헤더는 남겨서 모델이 "미상" 처리 가능하게
+        return f"### {prefix}:{label_norm}\n{text}"
+
     # 한국 조항들
-    korean_blocks = []
-    for item in korean_items:
-        korean_blocks.append(_format_item(item, limit=350))
-    
-    korean_section = "\n\n".join(korean_blocks)
-    
+    korean_blocks = [_format_item(it, prefix="KR", limit=350) for it in (korean_items or [])]
+    korean_section = "\n\n".join(korean_blocks).strip()
+
     # 외국 조항들
-    foreign_blocks = []
-    for item in foreign_items:
-        foreign_blocks.append(_format_item(item, limit=350))
-    
-    foreign_section = "\n\n".join(foreign_blocks)
-    
-    prompt = f"""당신은 헌법 비교 전문가입니다.
+    foreign_blocks = [_format_item(it, prefix="FX", limit=350) for it in (foreign_items or [])]
+    foreign_section = "\n\n".join(foreign_blocks).strip()
 
-**쿼리**: "{query}"
+    prompt = f"""당신은 헌법 비교 분석가입니다.
 
-아래 한국 헌법 조항들과 {foreign_country_name} 헌법 조항들을 비교하여 종합 요약을 작성하세요.
+[중요 규칙 - 반드시 준수]
+- 아래에 제공된 "한국 헌법 조항 텍스트"와 "{foreign_country_name} 헌법 조항 텍스트"만 근거로 사용하세요.
+- 제공되지 않은 조항 번호/내용을 추측하거나 외부 지식을 섞지 마세요.
+- 조항 번호/표기는 각 블록의 제목(예: KR:제10조, FX:Article 3 또는 FX:<display_path>)에 실제로 존재하는 것만 사용하세요.
+- 금지: "(요청하신 ...)", "---", "요약:", "출력:", "결론:", "다음과 같습니다", "확인할 수 있습니다" 같은 메타 문구/장식/라벨.
+- 바로 본문만 출력하세요. (머리말/인사/라벨/구분선/괄호 제목 금지)
+- 5~8문장, 불릿/번호매기기 금지.
 
-## 한국 헌법 ({len(korean_items)}개 조항)
+[작업 목표]
+쿼리: "{query}"
+- 위 쿼리 관점에서만 공통점/차이점을 비교하세요.
+- 쿼리와 직접 관련 없는 내용은 언급하지 마세요.
 
+[출력 형식]
+- 총 5~8문장으로만 작성.
+- 각 문장 끝에 근거 태그를 반드시 붙이세요: (KR:<조항> / FX:<조항>)
+  예) ...입니다. (KR:제10조 / FX:Article 3)
+- 만약 외국 조항의 번호/표기가 확실하지 않으면 "FX:미상"으로 표기하고, 번호를 만들어내지 마세요.
+- 한국도 동일하게 불확실하면 "KR:미상"을 사용하세요.
+
+## 한국 헌법 조항 텍스트 ({len(korean_items)}개)
 {korean_section}
 
-## {foreign_country_name} 헌법 ({len(foreign_items)}개 조항)
-
+## {foreign_country_name} 헌법 조항 텍스트 ({len(foreign_items)}개)
 {foreign_section}
 
----
-
-**요구사항**:
-1. 위에 제공된 모든 조항을 검토하여 비교
-2. 쿼리 "{query}" 관점에서 주요 공통점과 차이점 분석
-3. 각 국가의 특징적인 규정 명시
-4. 5~8문장으로 작성
-5. 조항 번호를 명시하며 구체적으로 설명
-6. 불릿 포인트 없이 문장으로만 작성
-
-**출력**:"""
-    
+[출력]
+"""
     return prompt
-
 
 def _make_country_summary_cache_key(req: CountrySummaryRequest) -> str:
     """국가별 요약 캐시 키 생성"""
