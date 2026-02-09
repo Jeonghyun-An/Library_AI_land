@@ -571,9 +571,13 @@
                         @click.prevent="selectedForeignCountry = null"
                       >
                         <span class="inn_txt">대한민국</span>
-                        <span class="flag"
-                          ><img src="/img/sub/img_flag.svg" alt=""
-                        /></span>
+                        <span class="flag">
+                          <img
+                            :src="getFlagUrl('KR')"
+                            :alt="`대한민국 국기`"
+                            @error="handleFlagError"
+                          />
+                        </span>
                       </a>
                     </div>
                   </div>
@@ -599,7 +603,11 @@
                           <span class="inn_txt">{{ country.name }}</span>
                         </span>
                         <span class="flag">
-                          <img src="/img/sub/img_flag.svg" alt="" />
+                          <img
+                            :src="getFlagUrl(country.code)"
+                            :alt="`${country.name} 국기`"
+                            @error="handleFlagError"
+                          />
                         </span>
                       </a>
                     </div>
@@ -891,6 +899,29 @@ const _lastForeign = ref({ docId: null, page: null, koreanIndex: null });
 const countrySummary = ref(null);
 const isGeneratingSummary = ref(false);
 
+// ==================== 국기 관련 유틸리티 ====================
+/**
+ * 국가 코드를 기반으로 국기 SVG 파일 경로를 반환
+ * @param {string} countryCode - 국가 코드 (예: 'KR', 'US', 'JP')
+ * @returns {string} 국기 이미지 경로
+ */
+function getFlagUrl(countryCode) {
+  if (!countryCode) {
+    return "/img/sub/img_flag.svg"; // 기본 이미지
+  }
+  const code = countryCode.toUpperCase();
+  return `/img/flag/${code}.svg`;
+}
+
+/**
+ * 국기 이미지 로드 실패 시 기본 이미지로 대체
+ * @param {Event} event - 이미지 에러 이벤트
+ */
+function handleFlagError(event) {
+  console.warn(`국기 이미지 로드 실패: ${event.target.src}`);
+  event.target.src = "/img/sub/img_flag.svg"; // 기본 이미지로 대체
+}
+
 // ==================== PDF 로드 및 페이지 이동 ====================
 async function loadKoreanPdf(result) {
   if (!result) return;
@@ -937,7 +968,7 @@ async function loadForeignPdf(result) {
   });
 
   if (!result) {
-    console.error(` [loadForeignPdf] result가 null 또는 undefined`);
+    console.error(`[loadForeignPdf] result가 null 또는 undefined`);
     return;
   }
 
@@ -948,13 +979,13 @@ async function loadForeignPdf(result) {
     const country = result.country;
     const version = result.structure?.version || "latest";
     docId = `${country}_latest`;
-    console.warn(` [loadForeignPdf] doc_id 없음 - 추정: ${docId}`);
+    console.warn(`[loadForeignPdf] doc_id 없음 - 추정: ${docId}`);
   }
 
   const page = result.page || 1;
   const currentKoreanIndex = selectedKoreanIndex.value;
 
-  console.log(` [loadForeignPdf] 중복 체크:`, {
+  console.log(`[loadForeignPdf] 중복 체크:`, {
     docId,
     page,
     koreanIndex: currentKoreanIndex,
@@ -965,14 +996,14 @@ async function loadForeignPdf(result) {
       _lastForeign.value.koreanIndex === currentKoreanIndex,
   });
 
-  //  핵심 수정: 한국 조항 인덱스도 함께 체크
+  // 핵심 수정: 한국 조항 인덱스도 함께 체크
   if (
     _lastForeign.value.docId === docId &&
     _lastForeign.value.page === page &&
     _lastForeign.value.koreanIndex === currentKoreanIndex
   ) {
     console.log(
-      ` [loadForeignPdf] 완전 중복 - 스킵 (같은 한국 조항 + 같은 외국 PDF)`,
+      `[loadForeignPdf] 완전 중복 - 스킵 (같은 한국 조항 + 같은 외국 PDF)`,
     );
     return;
   }
@@ -982,7 +1013,7 @@ async function loadForeignPdf(result) {
   foreignPdfUrl.value = getPdfDownloadUrl(docId, true);
   foreignPdfPage.value = page;
 
-  console.log(` [loadForeignPdf] PDF 로드 완료:`, {
+  console.log(`[loadForeignPdf] PDF 로드 완료:`, {
     docId,
     page,
     koreanIndex: currentKoreanIndex,
@@ -1002,7 +1033,7 @@ function scrollToPdfPage(viewerId, pageNumber) {
 }
 
 async function selectKoreanMatch(index, koreanItem) {
-  console.log(` [selectKoreanMatch] 시작: index=${index}`, {
+  console.log(`[selectKoreanMatch] 시작: index=${index}`, {
     article: koreanItem?.structure?.article_number,
     currentForeignCountry: selectedForeignCountry.value,
   });
@@ -1021,7 +1052,7 @@ async function selectKoreanMatch(index, koreanItem) {
   // 4. 새로운 pair의 외국 국가 목록 확인
   const newForeignCountries = Object.keys(foreignResultsByCountry.value || {});
 
-  console.log(` [selectKoreanMatch] 새 pair 분석:`, {
+  console.log(`[selectKoreanMatch] 새 pair 분석:`, {
     newCountries: newForeignCountries,
     foreignResultsByCountry: Object.keys(
       foreignResultsByCountry.value || {},
@@ -1033,7 +1064,7 @@ async function selectKoreanMatch(index, koreanItem) {
 
   if (newForeignCountries.length === 0) {
     // 외국 조항이 없으면 한국으로 돌아감
-    console.log(` [selectKoreanMatch] 외국 조항 없음 - 한국만 표시`);
+    console.log(`[selectKoreanMatch] 외국 조항 없음 - 한국만 표시`);
     selectedForeignCountry.value = null;
     selectedContinent.value = "korea";
     foreignPdfUrl.value = null;
@@ -1045,7 +1076,7 @@ async function selectKoreanMatch(index, koreanItem) {
     selectedForeignCountry.value &&
     newForeignCountries.includes(selectedForeignCountry.value);
 
-  console.log(` [selectKoreanMatch] 국가 유효성 체크:`, {
+  console.log(`[selectKoreanMatch] 국가 유효성 체크:`, {
     currentCountry: selectedForeignCountry.value,
     stillValid: currentCountryStillValid,
   });
@@ -1055,21 +1086,21 @@ async function selectKoreanMatch(index, koreanItem) {
     const firstCountry = foreignCountries.value[0];
     if (firstCountry) {
       console.log(
-        ` [selectKoreanMatch] 외국 국가 변경: ${selectedForeignCountry.value} → ${firstCountry.code}`,
+        `[selectKoreanMatch] 외국 국가 변경: ${selectedForeignCountry.value} → ${firstCountry.code}`,
       );
       selectedForeignCountry.value = firstCountry.code;
       selectedContinent.value = firstCountry.continent;
     }
   } else {
     console.log(
-      ` [selectKoreanMatch] 외국 국가 유지: ${selectedForeignCountry.value}`,
+      `[selectKoreanMatch] 외국 국가 유지: ${selectedForeignCountry.value}`,
     );
   }
 
-  //  7. 외국 PDF 항상 새로 로드 (국가가 유지되어도 pair가 바뀌었으므로!)
+  // 7. 외국 PDF 항상 새로 로드 (국가가 유지되어도 pair가 바뀌었으므로!)
   await nextTick();
   const foreignResults = displayedForeignResults.value;
-  console.log(` [selectKoreanMatch] displayedForeignResults:`, {
+  console.log(`[selectKoreanMatch] displayedForeignResults:`, {
     selectedCountry: selectedForeignCountry.value,
     resultCount: foreignResults.length,
     firstResult: foreignResults[0]
@@ -1085,16 +1116,16 @@ async function selectKoreanMatch(index, koreanItem) {
 
   if (foreignResults.length > 0) {
     const firstResult = foreignResults[0];
-    console.log(` [selectKoreanMatch] 외국 PDF 로드 실행`);
+    console.log(`[selectKoreanMatch] 외국 PDF 로드 실행`);
     await loadForeignPdf(firstResult);
   } else {
-    console.error(` [selectKoreanMatch] displayedForeignResults가 비어있음!`);
+    console.error(`[selectKoreanMatch] displayedForeignResults가 비어있음!`);
   }
 }
 
-//  새 함수: 외국 국가 선택 시 PDF 로드
+// 새 함수: 외국 국가 선택 시 PDF 로드
 async function selectForeignCountry(countryCode) {
-  console.log(` 외국 국가 선택: ${countryCode}`);
+  console.log(`외국 국가 선택: ${countryCode}`);
 
   selectedForeignCountry.value = countryCode;
 
@@ -1138,7 +1169,7 @@ const foreignResultsByCountry = computed(() => {
   const pairs = searchResult.value?.pairs || [];
   const pair = pairs[selectedKoreanIndex.value];
 
-  console.log(` [foreignResultsByCountry] computed 실행:`, {
+  console.log(`[foreignResultsByCountry] computed 실행:`, {
     selectedKoreanIndex: selectedKoreanIndex.value,
     totalPairs: pairs.length,
     currentPair: pair
@@ -1150,12 +1181,12 @@ const foreignResultsByCountry = computed(() => {
   });
 
   if (!pair) {
-    console.log(` [foreignResultsByCountry] pair 없음 - 빈 객체 반환`);
+    console.log(`[foreignResultsByCountry] pair 없음 - 빈 객체 반환`);
     return {};
   }
 
   const foreign = pair.foreign || {};
-  console.log(` [foreignResultsByCountry] 결과:`, {
+  console.log(`[foreignResultsByCountry] 결과:`, {
     countries: Object.keys(foreign),
     itemCounts: Object.entries(foreign).map(([code, data]) => ({
       code,
@@ -1204,7 +1235,7 @@ const availableContinents = computed(() => {
 });
 
 const displayedForeignResults = computed(() => {
-  console.log(` [displayedForeignResults] computed 실행:`, {
+  console.log(`[displayedForeignResults] computed 실행:`, {
     selectedForeignCountry: selectedForeignCountry.value,
     selectedKoreanIndex: selectedKoreanIndex.value,
     foreignResultsByCountryKeys: Object.keys(
@@ -1213,7 +1244,7 @@ const displayedForeignResults = computed(() => {
   });
 
   if (!selectedForeignCountry.value) {
-    console.log(` [displayedForeignResults] 국가 미선택 - 빈 배열 반환`);
+    console.log(`[displayedForeignResults] 국가 미선택 - 빈 배열 반환`);
     return [];
   }
 
@@ -1221,7 +1252,7 @@ const displayedForeignResults = computed(() => {
     foreignResultsByCountry.value[selectedForeignCountry.value];
   const results = countryData?.items || [];
 
-  console.log(` [displayedForeignResults] 결과:`, {
+  console.log(`[displayedForeignResults] 결과:`, {
     country: selectedForeignCountry.value,
     itemCount: results.length,
     firstItem: results[0]
@@ -1782,7 +1813,31 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 
+/* ==================== 국기 이미지 스타일 ==================== */
+.flag img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* 국기 이미지 로드 실패 시 대체 스타일 */
+.flag img[src*="img_flag.svg"] {
+  opacity: 0.5;
+}
+
 /* ==================== PDF 뷰어 컨테이너 (좌우 분할) ==================== */
+/* .pdf_view_wrap {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.pdf_view_wrap .half {
+  flex: 1;
+  min-width: 0;
+} */
+
 .pdf_view_container {
   width: 100%;
   height: 800px;
