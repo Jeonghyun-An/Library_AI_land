@@ -183,7 +183,7 @@ def preload_reranker():
         # 테스트 스코어링으로 워밍업
         try:
             test_pairs = [["test query", "test document"]]
-            _ = reranker.compute_score(test_pairs, normalize=True)
+            _ = reranker.compute_score(test_pairs)
             print("[RERANK] Reranker warmed up successfully")
         except Exception as e:
             print(f"[RERANK] Warmup failed: {e}")
