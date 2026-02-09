@@ -447,13 +447,32 @@
 
           <!-- 검색 결과 -->
           <div v-else-if="searchResult" class="list_answer_list">
-            <!-- 요약 -->
-            <div v-if="searchResult.summary" class="list_answer_item">
+            <!-- 요약 - 조건부 표시 변경 -->
+            <div
+              v-if="countrySummary || isGeneratingSummary"
+              class="list_answer_item"
+            >
               <div class="con_tit ty_02 mb_25i">
-                <img src="/img/icon/ic_summary.svg" alt="" class="ic" />질의
-                요약
+                <img src="/img/icon/ic_summary.svg" alt="" class="ic" />
+                {{
+                  countrySummary
+                    ? `${countrySummary.foreign_country_name} 비교 분석`
+                    : "질의 요약"
+                }}
               </div>
-              <div class="summary_txt">{{ searchResult.summary }}</div>
+
+              <!-- 요약 생성 중 -->
+              <div v-if="isGeneratingSummary" class="loading_wrap">
+                <div class="circle_wrap">
+                  <img src="/img/icon/ic_ing.gif" alt="" class="circle_img" />
+                </div>
+                <div class="loading_txt">비교 분석 생성 중...</div>
+              </div>
+
+              <!-- 요약 텍스트 -->
+              <div v-else class="summary_txt">
+                {{ countrySummary.summary }}
+              </div>
             </div>
 
             <!-- 국가 선택 + PDF 뷰어 -->
@@ -845,7 +864,8 @@ useHead({
 });
 
 // ==================== API Composable 사용 ====================
-const { comparativeSearch, getPdfDownloadUrl } = useConstitutionAPI();
+const { comparativeSearch, getPdfDownloadUrl, generateCountrySummary } =
+  useConstitutionAPI();
 
 // ==================== 상태 관리 ====================
 const searchQuery = ref("");
@@ -867,6 +887,9 @@ const foreignPdfPage = ref(1);
 
 const _lastKorean = ref({ docId: null, page: null });
 const _lastForeign = ref({ docId: null, page: null, koreanIndex: null });
+
+const countrySummary = ref(null);
+const isGeneratingSummary = ref(false);
 
 // ==================== PDF 로드 및 페이지 이동 ====================
 async function loadKoreanPdf(result) {
@@ -1086,6 +1109,7 @@ async function selectForeignCountry(countryCode) {
   if (firstResult) {
     await loadForeignPdf(firstResult);
   }
+  await generateCountryComparisonSummary(countryCode);
 }
 
 // ==================== Computed ====================
@@ -1230,6 +1254,7 @@ async function handleSearch() {
   currentSearchQuery.value = searchQuery.value;
   hasSearched.value = true;
   isSearching.value = true;
+  countrySummary.value = null;
 
   try {
     // 검색 시작 시 anchor 초기화
@@ -1240,7 +1265,7 @@ async function handleSearch() {
       korean_top_k: 8,
       foreign_per_country: 8,
       foreign_pool_size: 50,
-      generate_summary: true,
+      generate_summary: false,
     });
 
     searchResult.value = response;
@@ -1262,6 +1287,7 @@ async function handleSearch() {
       if (firstForeignResult) {
         await loadForeignPdf(firstForeignResult);
       }
+      await generateCountryComparisonSummary(firstCountry.code);
     } else {
       selectedContinent.value = "korea";
       selectedForeignCountry.value = null;
@@ -1276,6 +1302,43 @@ async function handleSearch() {
     alert("검색 중 오류가 발생했습니다. 다시 시도해주세요.");
   } finally {
     isSearching.value = false;
+  }
+}
+
+async function generateCountryComparisonSummary(countryCode) {
+  if (!countryCode || !searchResult.value) return;
+  try {
+    isGeneratingSummary.value = true;
+    countrySummary.value = null;
+    console.log(`[generateCountryComparisonSummary] 시작: ${countryCode}`);
+
+    const allKoreanItems = [];
+    const allForeignItems = [];
+
+    searchResult.value.pairs.forEach((pair) => {
+      if (pair.korean) {
+        allKoreanItems.push(pair.korean);
+      }
+      const foreignData = pair.foreign || {};
+      if (foreignData[countryCode]) {
+        foreignData[countryCode].items.forEach((item) => {
+          allForeignItems.push(item);
+        });
+      }
+    });
+    const response = await generateCountrySummary({
+      query: searchQuery.value,
+      korean_items: allKoreanItems,
+      foreign_country: countryCode,
+      foreign_items: allForeignItems,
+      max_tokens: 800,
+      temperature: 0.3,
+    });
+    countrySummary.value = response;
+  } catch (error) {
+    console.error("국가 요약 생성 실패:", error);
+  } finally {
+    isGeneratingSummary.value = false;
   }
 }
 
