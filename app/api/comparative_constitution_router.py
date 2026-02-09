@@ -1825,13 +1825,54 @@ async def comparative_search(request: ComparativeSearchRequest):
                 foreign=foreign_block
             )
         )
-
+    # ========== 5. 요약 생성 ==========
+    summary = None
+    if request.generate_summary and pairs:
+        try:
+            print(f"[SUMMARY] 요약 생성 시작...")
+            
+            # 첫 번째 pair의 한국 조항
+            first_pair = pairs[0]
+            korean_item = first_pair.korean
+            
+            # 각 국가의 첫 번째 조항만 사용
+            foreign_by_country = {}
+            for country_code, paged_result in first_pair.foreign.items():
+                if paged_result.items:
+                    foreign_by_country[country_code] = PairSummaryCountryPack(
+                        items=[paged_result.items[0]]  # 첫 번째만
+                    )
+            
+            if foreign_by_country:
+                # 프롬프트 생성
+                prompt = build_pair_summary_prompt(
+                    query=request.query,
+                    korean_item=korean_item,
+                    foreign_by_country=foreign_by_country
+                )
+                
+                # LLM 호출
+                summary = await _call_vllm_completion(
+                    prompt=prompt,
+                    max_tokens=320,
+                    temperature=0.3
+                )
+                
+                print(f"[SUMMARY] 요약 생성 완료: {len(summary)} chars")
+            else:
+                print(f"[SUMMARY] 외국 조항이 없어 요약 생략")
+        
+        except Exception as e:
+            print(f"[SUMMARY] 요약 생성 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            # 요약 실패해도 검색 결과는 반환
     elapsed = (time.time() - start) * 1000
 
     return ComparativeSearchResponse(
         query=request.query,
         pairs=pairs,
-        summary=None,  # 추후 구현
+        summary=summary,
         search_time_ms=elapsed,
         search_id=search_id
     )
@@ -1847,7 +1888,7 @@ def build_pair_summary_prompt(
     - 결과는 3~5문장 권장 (UI 상단 요약)
     """
 
-    def _clean_text(s: Optional[str], limit: int = 1200) -> str:
+    def _clean_text(s: Optional[str], limit: int = 400) -> str:
         if not s:
             return ""
         s = s.strip()
