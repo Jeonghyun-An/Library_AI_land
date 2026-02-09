@@ -1882,89 +1882,71 @@ def build_pair_summary_prompt(
     korean_item: ConstitutionArticleResult,
     foreign_by_country: Dict[str, PairSummaryCountryPack],
 ) -> str:
-    """
-    '현재 화면' pair 상태(한국 1개 + 외국 국가별 현재 조항들)로만 비교 요약하도록 만드는 프롬프트.
-    - 절대 다른 조항/외부지식 끌어오지 않게 강하게 제한
-    - 결과는 3~5문장 권장 (UI 상단 요약)
-    """
-
     def _clean_text(s: Optional[str], limit: int = 400) -> str:
         if not s:
             return ""
         s = s.strip()
         if len(s) <= limit:
             return s
-        return s[:limit] + "\n...[truncated]"
+        return s[:limit] + "...[생략]"
 
     # 한국 anchor
     kr_path = korean_item.display_path or "한국 헌법"
     kr_article = ""
     st = korean_item.structure or {}
     if isinstance(st, dict) and st.get("article_number"):
-        kr_article = f"(Article {st.get('article_number')})"
+        kr_article = f"(제{st.get('article_number')}조)"
 
-    kr_text = _clean_text(korean_item.korean_text or korean_item.english_text or "")
+    kr_text = _clean_text(korean_item.korean_text or korean_item.english_text or "", limit=500)
 
-    # 외국: 국가별 1개(또는 items[0])만 사용
+    # 외국: 최대 5개 국가만 비교 (너무 많으면 토큰 초과)
     foreign_blocks: List[str] = []
-    for country_code, pack in (foreign_by_country or {}).items():
+    max_countries = 5
+    
+    for idx, (country_code, pack) in enumerate(foreign_by_country.items()):
+        if idx >= max_countries:
+            remaining = len(foreign_by_country) - max_countries
+            foreign_blocks.append(f"(그 외 {remaining}개 국가 생략)")
+            break
+            
         if not pack or not pack.items:
             continue
 
-        item = pack.items[0]  # "현재 페이지" 1개만 비교
+        item = pack.items[0]
         f_country = item.country_name or country_code
         f_path = item.display_path or ""
         f_struct = item.structure if isinstance(item.structure, dict) else {}
         f_article = f_struct.get("article_number")
-        f_article_str = f"(Article {f_article})" if f_article else ""
+        f_article_str = f"(제{f_article}조)" if f_article else ""
 
-        f_en = _clean_text(item.english_text or "", limit=900)
-        f_ko = _clean_text(item.korean_text or "", limit=900)
-
-        # bilingual/mono 모두 커버
-        if f_en and f_ko:
-            f_text = f"[EN]\n{f_en}\n\n[KO]\n{f_ko}"
-        elif f_ko:
-            f_text = f"[KO]\n{f_ko}"
-        else:
-            f_text = f"[EN]\n{f_en}"
+        # 영문만 사용 (한영 모두 넣으면 너무 김)
+        f_text = _clean_text(item.english_text or item.korean_text or "", limit=350)
 
         foreign_blocks.append(
-            f"## {f_country} {f_article_str} {f_path}\n{f_text}".strip()
+            f"## {f_country} {f_article_str}\n{f_text}".strip()
         )
 
-    foreign_section = "\n\n".join(foreign_blocks) if foreign_blocks else "(외국 헌법 조항이 제공되지 않았습니다.)"
+    foreign_section = "\n\n".join(foreign_blocks) if foreign_blocks else "(비교 대상 없음)"
 
-    # 핵심: "현재 제공된 텍스트만" 사용, 조문번호/경로를 반드시 명시
-    prompt = f"""
-당신은 "비교헌법 요약"을 생성하는 법률 비교 어시스턴트입니다.
+    # 프롬프트 간소화
+    prompt = f"""당신은 헌법 비교 전문가입니다. 아래 조항들을 비교하여 3~5문장으로 요약하세요.
 
-[목표]
-- 사용자가 입력한 쿼리 "{query}" 관점에서,
-- 아래에 제공된 '한국 헌법 1개 조항'과 '외국 헌법(국가별 현재 조항)'을 비교하여
-- UI 상단에 표시할 짧고 정확한 비교 요약을 작성하세요.
+**쿼리**: {query}
 
-[절대 규칙]
-1) 외부 지식/추측 금지. 아래 제공된 텍스트 밖의 내용은 말하지 마세요.
-2) 현재 제공된 조항들만 비교하세요. 다른 조항을 끌어오지 마세요.
-3) 반드시 "한국: {kr_path} {kr_article}" 와
-   외국은 국가별로 "{Country} + 조항/경로" 를 명시해서 비교하세요.
-4) 결과는 3~5문장. 각 문장은 정보 밀도가 높게.
-5) 공통점(1~2문장) + 차이점(1~2문장) + 주의/요약(선택 1문장) 구조 권장.
-6) 법률 용어는 중립적으로, 과장/평가/정치적 판단 금지.
-
-# 한국 헌법 (Anchor)
-- 경로: {kr_path} {kr_article}
-- 텍스트:
+**한국**: {kr_path} {kr_article}
 {kr_text}
 
-# 외국 헌법 (국가별 현재 조항)
+**외국 헌법**:
 {foreign_section}
 
-[출력 형식]
-- 한국 조항과 각 국가 조항을 비교하는 '단락 1개'로만 작성.
-- 불릿/번호 없이 문장으로만 작성.
-""".strip()
+**요구사항**:
+1. 제공된 텍스트만 사용
+2. 공통점과 차이점 중심
+3. 조항 번호 명시
+4. 3~5문장으로 간결하게
+5. 불릿 없이 문장으로만
+
+**출력**:"""
 
     return prompt
 
