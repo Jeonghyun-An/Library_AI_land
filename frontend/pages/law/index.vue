@@ -643,7 +643,11 @@
                         @click="selectKoreanMatch(idx, result)"
                       >
                         <div class="result_article">
-                          {{ result.structure.article_number || "조항" }}
+                          {{
+                            result.structure.article_number
+                              ? `${result.structure.article_number}조`
+                              : "전문"
+                          }}
                           <span
                             v-if="result.structure.chapter_title"
                             class="result_chapter"
@@ -699,7 +703,11 @@
                         @click="loadForeignPdf(result)"
                       >
                         <div class="result_article">
-                          {{ result.structure.article_number || "Article" }}
+                          {{
+                            result.structure.article_number
+                              ? `${result.structure.article_number}조`
+                              : "전문"
+                          }}
                           <span
                             v-if="result.structure.chapter_title"
                             class="result_chapter"

@@ -250,8 +250,7 @@ select {
   display: inline-block;
 }
 :focus {
-  outline: 2px dashed #256ef4;
-  outline-offset: 2px;
+  outline: none;
   transition: none;
 }
 .select_box_wrap {
