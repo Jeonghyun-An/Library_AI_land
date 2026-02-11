@@ -4,6 +4,8 @@
  * 백엔드: app/api/comparative_constitution_router.py
  */
 
+import { get } from "http";
+
 export const useConstitutionAPI = () => {
   const config = useRuntimeConfig();
   const apiBase = config.public.apiBase || "http://localhost:8000";
@@ -367,6 +369,47 @@ export const useConstitutionAPI = () => {
     }
   };
 
+  /**
+   * PDF 페이지 치수 + 이미지 URL 조회 (단일 페이지)
+   *
+   * @param docId - 문서 ID
+   * @param pageNo - 페이지 번호 (1-based)
+   * @param dpi - 해상도 (기본: 150)
+   * @returns PageDimensionsResponse
+   */
+  const getPageDimensions = async (
+    docId: string,
+    pageNo: number,
+    dpi: number = 150,
+  ) => {
+    try {
+      const url = `${apiBase}/constitution/pdf/${docId}/page/${pageNo}/dimensions?dpi=${dpi}`;
+      const response = await $fetch(url, { method: "GET" });
+      return response;
+    } catch (error: any) {
+      console.error("[API] 페이지 치수 조회 실패:", error);
+      throw error;
+    }
+  };
+
+  /**
+   * PDF 전체 페이지 치수 일괄 조회 (초기 로딩용)
+   *
+   * @param docId - 문서 ID
+   * @param dpi - 해상도 (기본: 150)
+   * @returns { doc_id, total_pages, dpi, pages: PageDimensions[] }
+   */
+  const getAllPageDimensions = async (docId: string, dpi: number = 150) => {
+    try {
+      const url = `${apiBase}/constitution/pdf/${docId}/all-page-dimensions?dpi=${dpi}`;
+      const response = await $fetch(url, { method: "GET" });
+      return response;
+    } catch (error: any) {
+      console.error("[API] 전체 페이지 치수 조회 실패:", error);
+      throw error;
+    }
+  };
+
   return {
     // 검색
     comparativeSearch,
@@ -389,5 +432,7 @@ export const useConstitutionAPI = () => {
     // PDF
     getPdfPageImage,
     getPdfDownloadUrl,
+    getPageDimensions,
+    getAllPageDimensions,
   };
 };

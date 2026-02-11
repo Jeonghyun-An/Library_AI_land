@@ -630,6 +630,20 @@
                         class="pdf_iframe"
                         frameborder="0"
                       ></iframe>
+                      <!-- <PDFHighlightViewer
+                        v-if="koreanDocId"
+                        :doc-id="koreanDocId"
+                        title="대한민국 헌법"
+                        country-code="KR"
+                        :search-results="koreanHighlightResults"
+                        :initial-page="koreanPdfPage"
+                        :dpi="150"
+                        @highlight-click="onKoreanHighlightClick"
+                        @page-change="(p) => (koreanPdfPage = p)"
+                      />
+                      <div v-else class="pdf_placeholder">
+                        <p>검색 결과를 선택하면 PDF가 표시됩니다.</p>
+                      </div> -->
                     </div>
 
                     <!-- 우측 1/3: 검색 결과 목록 (독립 스크롤) -->
@@ -690,6 +704,20 @@
                         class="pdf_iframe"
                         frameborder="0"
                       ></iframe>
+                      <!-- <PDFHighlightViewer
+                        v-if="foreignDocId"
+                        :doc-id="foreignDocId"
+                        :title="selectedCountryName + ' 헌법'"
+                        :country-code="selectedForeignCountry || ''"
+                        :search-results="foreignHighlightResults"
+                        :initial-page="foreignPdfPage"
+                        :dpi="150"
+                        @highlight-click="onForeignHighlightClick"
+                        @page-change="(p) => (foreignPdfPage = p)"
+                      />
+                      <div v-else class="pdf_placeholder">
+                        <p>국가를 선택하면 PDF가 표시됩니다.</p>
+                      </div> -->
                     </div>
 
                     <!-- 우측 1/3: 검색 결과 목록 (독립 스크롤) -->
@@ -898,6 +926,10 @@ const koreanPdfUrl = ref(null);
 const foreignPdfUrl = ref(null);
 const koreanPdfPage = ref(1);
 const foreignPdfPage = ref(1);
+const koreanDocId = ref(null);
+const foreignDocId = ref(null);
+const koreanHighlightResults = ref([]);
+const foreignHighlightResults = ref([]);
 
 const _lastKorean = ref({ docId: null, page: null });
 const _lastForeign = ref({ docId: null, page: null, koreanIndex: null });
@@ -951,6 +983,13 @@ async function loadKoreanPdf(result) {
 
   koreanPdfUrl.value = getPdfDownloadUrl(docId, true);
   koreanPdfPage.value = page;
+
+  // [추가] PDFHighlightViewer용
+  koreanDocId.value = docId;
+
+  // [추가] 현재 선택된 한국 조항의 검색 결과를 하이라이트 데이터로 전달
+  // koreanResults 전체를 전달하면 여러 조항의 bbox가 한꺼번에 표시됨
+  koreanHighlightResults.value = koreanResults.value || [];
 
   await nextTick();
   scrollToPdfPage("korean-pdf-viewer", page);
@@ -1019,11 +1058,18 @@ async function loadForeignPdf(result) {
   foreignPdfUrl.value = getPdfDownloadUrl(docId, true);
   foreignPdfPage.value = page;
 
+  // [추가] PDFHighlightViewer용
+  foreignDocId.value = docId;
+
+  // [추가] 현재 선택된 국가의 검색 결과를 하이라이트 데이터로 전달
+  foreignHighlightResults.value = displayedForeignResults.value || [];
+
   console.log(`[loadForeignPdf] PDF 로드 완료:`, {
     docId,
     page,
     koreanIndex: currentKoreanIndex,
     pdfUrl: foreignPdfUrl.value,
+    highlightCount: foreignHighlightResults.value.length,
   });
 
   await nextTick();
@@ -1129,7 +1175,6 @@ async function selectKoreanMatch(index, koreanItem) {
   }
 }
 
-// 새 함수: 외국 국가 선택 시 PDF 로드
 async function selectForeignCountry(countryCode) {
   console.log(`외국 국가 선택: ${countryCode}`);
 
@@ -1147,6 +1192,34 @@ async function selectForeignCountry(countryCode) {
     await loadForeignPdf(firstResult);
   }
   await generateCountryComparisonSummary(countryCode);
+}
+/**
+ * 한국 헌법 하이라이트 클릭 → 해당 조항 선택
+ */
+function onKoreanHighlightClick(result) {
+  if (!result) return;
+  const matchIndex = koreanResults.value.findIndex(
+    (r) =>
+      (r.structure?.article_number || "") ===
+      (result.structure?.article_number || ""),
+  );
+  if (matchIndex >= 0 && matchIndex !== selectedKoreanIndex.value) {
+    selectKoreanMatch(matchIndex, result);
+  }
+}
+
+/**
+ * 외국 헌법 하이라이트 클릭 → 해당 조항의 페이지로 이동
+ */
+function onForeignHighlightClick(result) {
+  if (!result) return;
+  console.log(`[onForeignHighlightClick]`, {
+    country: result.country,
+    article: result.structure?.article_number,
+    page: result.page,
+  });
+  // 페이지는 PDFHighlightViewer 내부에서 자동 이동됨
+  // 추가 동작이 필요하면 여기에 구현
 }
 
 // ==================== Computed ====================
@@ -1929,7 +2002,18 @@ onBeforeUnmount(() => {
   border-color: var(--primary);
   background: var(--primary10);
 }
-
+.pdf_placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 400px;
+  background: #f3f4f6;
+  border: 2px dashed #d1d5db;
+  border-radius: 8px;
+  color: #9ca3af;
+  font-size: 14px;
+}
 /* 조항 번호 */
 .result_article {
   font-weight: 600;

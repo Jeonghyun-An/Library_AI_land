@@ -2225,6 +2225,31 @@ def build_country_summary_prompt(
     - 문장 끝 근거 태그 강제 (KR: / FX:)
     - KR/FX 헤더 prefix로 국가 구분 강화
     """
+#     _LOOKUP_HINTS = [
+#     "몇조", "몇 조", "몇항", "몇 항", "어느 조", "어느조", "어느 항", "어느항",
+#     "조항 번호", "조문 번호", "조항위치", "조문위치", "근거 조항", "근거조항",
+#     "조문", "조항", "article number", "which article", "which section", "paragraph",
+# ]
+
+#     def is_lookup_query(query: str) -> bool:
+#         q = (query or "").strip().lower()
+#         q_compact = re.sub(r"\s+", "", q)
+    
+#         # 한글/영문 힌트
+#         for h in _LOOKUP_HINTS:
+#             hh = h.lower()
+#             if re.sub(r"\s+", "", hh) in q_compact:
+#                 return True
+    
+#         # "제10조", "Article 3" 같은 직접 번호 질의도 lookup으로 간주
+#         if re.search(r"제\s*\d+\s*조", q):
+#             return True
+#         if re.search(r"\barticle\s*\(?\s*\d+\s*\)?\b", q, re.IGNORECASE):
+#             return True
+    
+#         return False
+    
+
 
     def _clean_text(s: Optional[str], limit: int = 320) -> str:
         if not s:
@@ -2235,34 +2260,44 @@ def build_country_summary_prompt(
         return s[:limit] + "...[TRUNCATED]"
 
     def _pick_article_label(item: ConstitutionArticleResult) -> str:
-        """
-        item.structure.article_number가 있으면 우선 사용.
-        없으면 display_path를 사용.
-        """
         st = item.structure or {}
         article = st.get("article_number")
+        paragraph = st.get("paragraph")  # <-- 여기
         if article:
-            # 숫자/문자 모두 가능하게 str 처리
-            return f"{article}".strip()
+            a = f"{article}".strip()
+            if paragraph:
+                p = f"{paragraph}".strip()
+                # 한국은 "제N조/p" 형태로, 외국은 Article N/p 형태로 _format_item에서 처리
+                return f"{a}::{p}"
+            return a
         return (item.display_path or "unknown").strip()
 
     def _format_item(item: ConstitutionArticleResult, prefix: str, limit: int = 320) -> str:
-        """
-        prefix: 'KR' or 'FX'
-        """
         label_raw = _pick_article_label(item)
 
-        # 숫자처럼 보이면 한국은 '제N조', 외국은 'Article N' 느낌을 주되,
-        # display_path 기반인 경우는 원문을 유지(환각 방지).
-        label_norm = label_raw
-        if label_raw.isdigit():
+        para = None
+        label_base = label_raw
+        if "::" in label_raw:
+            label_base, para = label_raw.split("::", 1)
+            label_base = label_base.strip()
+            para = para.strip()
+
+        label_norm = label_base
+        if label_base.isdigit():
             if prefix == "KR":
-                label_norm = f"제{label_raw}조"
+                label_norm = f"제{label_base}조"
+                if para:
+                    label_norm = f"{label_norm} {para}항"
             else:
-                label_norm = f"Article {label_raw}"
+                label_norm = f"Article {label_base}"
+                if para:
+                    label_norm = f"{label_norm}({para})"
+        else:
+            # display_path 기반이면 그대로 두되, paragraph가 있으면 뒤에 덧붙이기(환각 방지)
+            if para:
+                label_norm = f"{label_norm}/{para}"
 
         text = _clean_text(item.korean_text or item.english_text or "", limit=limit)
-        # 텍스트가 비어있을 때도 헤더는 남겨서 모델이 "미상" 처리 가능하게
         return f"### {prefix}:{label_norm}\n{text}"
 
     # 한국 조항들
@@ -2282,6 +2317,8 @@ def build_country_summary_prompt(
 - 금지: "(요청하신 ...)", "---", "요약:", "출력:", "결론:", "다음과 같습니다", "확인할 수 있습니다" 같은 메타 문구/장식/라벨.
 - 바로 본문만 출력하세요. (머리말/인사/라벨/구분선/괄호 제목 금지)
 - 5~8문장, 불릿/번호매기기 금지.
+- 한 문장당 한 줄만 사용하세요.
+- 한 줄에 두 개 이상의 문장을 쓰지 마세요.
 
 [작업 목표]
 쿼리: "{query}"
@@ -2661,6 +2698,215 @@ async def get_pdf_page_image(
         traceback.print_exc()
         raise HTTPException(500, f"페이지 이미지 생성 실패: {e}")
 
+class PageDimensionsResponse(BaseModel):
+    """페이지 치수 + 이미지 URL 응답"""
+    doc_id: str
+    page_no: int
+    width_pt: float       # PDF 페이지 너비 (pt, 72 DPI 기준)
+    height_pt: float      # PDF 페이지 높이 (pt, 72 DPI 기준)
+    image_width_px: int   # 렌더링된 이미지 너비 (px)
+    image_height_px: int  # 렌더링된 이미지 높이 (px)
+    dpi: int
+    total_pages: int
+    image_url: str        # 이미지 URL
+
+
+@router.get("/pdf/{doc_id}/page/{page_no}/dimensions",
+    summary="PDF 페이지 치수 정보 반환",
+    description="""
+    bbox 하이라이트를 위한 페이지 치수 정보를 반환합니다.
+    - width_pt / height_pt: PDF 원본 좌표계 (72 DPI 기준)
+    - image_width_px / image_height_px: 렌더링 이미지 크기
+    - image_url: 해당 페이지 이미지 URL
+    
+    프론트엔드에서 bbox 좌표를 이미지 위에 오버레이할 때 사용합니다.
+    scale_x = image_width_px / width_pt
+    scale_y = image_height_px / height_pt
+    """,
+    response_model=PageDimensionsResponse
+)
+async def get_page_dimensions(
+    doc_id: str,
+    page_no: int,
+    dpi: int = 150
+):
+    """
+    PDF 페이지의 치수 정보를 반환 (bbox → 이미지 좌표 변환용)
+    """
+    try:
+        parts = doc_id.split("_")
+        if len(parts) < 2:
+            raise HTTPException(400, f"잘못된 doc_id 형식: {doc_id}")
+        
+        country_code = parts[0].upper()
+        
+        minio_client = get_minio_client()
+        bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+        prefix = f"constitutions/{country_code}/"
+        
+        # MinIO에서 PDF 찾기
+        pdf_object = None
+        objects = minio_client.list_objects(bucket_name, prefix=prefix, recursive=True)
+        for obj in objects:
+            if obj.object_name.endswith(".pdf") and doc_id in obj.object_name:
+                pdf_object = obj
+                break
+        
+        if not pdf_object:
+            # doc_id 직접 매칭 시도
+            possible_keys = [
+                f"constitutions/{country_code}/{doc_id}.pdf",
+                f"constitutions/{country_code}/pdf/{doc_id}.pdf",
+            ]
+            for key in possible_keys:
+                try:
+                    minio_client.stat_object(bucket_name, key)
+                    class FakeObj:
+                        def __init__(self, name):
+                            self.object_name = name
+                    pdf_object = FakeObj(key)
+                    break
+                except:
+                    continue
+        
+        if not pdf_object:
+            raise HTTPException(404, f"PDF를 찾을 수 없습니다: {doc_id}")
+        
+        # PDF 바이트 가져오기
+        response = minio_client.get_object(bucket_name, pdf_object.object_name)
+        pdf_bytes = response.read()
+        response.close()
+        response.release_conn()
+        
+        # PyMuPDF로 페이지 치수 추출
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        if page_no < 1 or page_no > len(doc):
+            doc.close()
+            raise HTTPException(400, f"잘못된 페이지 번호: {page_no} (총 {len(doc)}페이지)")
+        
+        page = doc[page_no - 1]
+        rect = page.rect  # PDF 페이지 rect (pt 단위, 72 DPI 기준)
+        
+        # 이미지 크기 계산
+        zoom = dpi / 72.0
+        image_width_px = int(rect.width * zoom)
+        image_height_px = int(rect.height * zoom)
+        
+        total_pages = len(doc)
+        doc.close()
+        
+        # 이미지 URL 생성
+        image_url = f"/api/constitution/pdf/{doc_id}/page/{page_no}?format=png&dpi={dpi}"
+        
+        return PageDimensionsResponse(
+            doc_id=doc_id,
+            page_no=page_no,
+            width_pt=float(rect.width),
+            height_pt=float(rect.height),
+            image_width_px=image_width_px,
+            image_height_px=image_height_px,
+            dpi=dpi,
+            total_pages=total_pages,
+            image_url=image_url
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[PDF] Page dimensions error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"페이지 치수 조회 실패: {e}")
+
+
+@router.get("/pdf/{doc_id}/all-page-dimensions",
+    summary="PDF 전체 페이지 치수 일괄 반환",
+    description="모든 페이지의 치수 정보를 한 번에 반환합니다."
+)
+async def get_all_page_dimensions(
+    doc_id: str,
+    dpi: int = 150
+):
+    """
+    PDF 전체 페이지의 치수 정보를 일괄 반환 (프론트엔드 초기화용)
+    """
+    try:
+        parts = doc_id.split("_")
+        if len(parts) < 2:
+            raise HTTPException(400, f"잘못된 doc_id 형식: {doc_id}")
+        
+        country_code = parts[0].upper()
+        
+        minio_client = get_minio_client()
+        bucket_name = os.getenv("MINIO_BUCKET", "library-bucket")
+        prefix = f"constitutions/{country_code}/"
+        
+        pdf_object = None
+        objects = minio_client.list_objects(bucket_name, prefix=prefix, recursive=True)
+        for obj in objects:
+            if obj.object_name.endswith(".pdf") and doc_id in obj.object_name:
+                pdf_object = obj
+                break
+        
+        if not pdf_object:
+            possible_keys = [
+                f"constitutions/{country_code}/{doc_id}.pdf",
+                f"constitutions/{country_code}/pdf/{doc_id}.pdf",
+            ]
+            for key in possible_keys:
+                try:
+                    minio_client.stat_object(bucket_name, key)
+                    class FakeObj:
+                        def __init__(self, name):
+                            self.object_name = name
+                    pdf_object = FakeObj(key)
+                    break
+                except:
+                    continue
+        
+        if not pdf_object:
+            raise HTTPException(404, f"PDF를 찾을 수 없습니다: {doc_id}")
+        
+        response = minio_client.get_object(bucket_name, pdf_object.object_name)
+        pdf_bytes = response.read()
+        response.close()
+        response.release_conn()
+        
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        zoom = dpi / 72.0
+        pages = []
+        for i in range(len(doc)):
+            page = doc[i]
+            rect = page.rect
+            pages.append({
+                "page_no": i + 1,
+                "width_pt": float(rect.width),
+                "height_pt": float(rect.height),
+                "image_width_px": int(rect.width * zoom),
+                "image_height_px": int(rect.height * zoom),
+            })
+        
+        total_pages = len(doc)
+        doc.close()
+        
+        return {
+            "doc_id": doc_id,
+            "total_pages": total_pages,
+            "dpi": dpi,
+            "pages": pages
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[PDF] All page dimensions error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"전체 페이지 치수 조회 실패: {e}")
 
 # ==================== 통계 엔드포인트 ====================
 @router.get("/debug/milvus/info",
