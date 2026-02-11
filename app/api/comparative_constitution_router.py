@@ -1707,32 +1707,32 @@ async def comparative_search(request: ComparativeSearchRequest):
             continent=get_continent(meta.get('country', 'KR'))
         )
         korean_results.append(result)
-        KOREAN_SCORE_THRESHOLD = float(os.getenv("KOREAN_SCORE_THRESHOLD", "0.2"))
+    KOREAN_SCORE_THRESHOLD = float(os.getenv("KOREAN_SCORE_THRESHOLD", "0.2"))
         
         # score 기준으로 정렬 (높은 순)
-        korean_results = sorted(korean_results, key=lambda x: x.score, reverse=True)
+    korean_results = sorted(korean_results, key=lambda x: x.score, reverse=True)
         
-        # threshold 이상만 필터링
-        filtered_korean = [
-            kr for kr in korean_results 
-            if kr.score >= KOREAN_SCORE_THRESHOLD
-        ]
-        
-        # 필터링 결과가 0개면 최소 1개는 보장
-        if not filtered_korean and korean_results:
-            filtered_korean = korean_results[:1]
-            print(f"[KOREAN_FILTER] 모든 조항이 threshold({KOREAN_SCORE_THRESHOLD}) 미만 - 최고점만 유지: {filtered_korean[0].display_path} (score: {filtered_korean[0].score:.3f})")
-        else:
-            removed_count = len(korean_results) - len(filtered_korean)
-            if removed_count > 0:
-                print(f"[KOREAN_FILTER] {removed_count}개 조항 제거 (threshold: {KOREAN_SCORE_THRESHOLD})")
-                print(f"[KOREAN_FILTER] 유지된 조항: {[kr.display_path for kr in filtered_korean]}")
-                print(f"[KOREAN_FILTER] 점수: {[f'{kr.score:.3f}' for kr in filtered_korean]}")
-        
-        # request.korean_top_k 제한
-        korean_results = filtered_korean[:request.korean_top_k]
-        
-        print(f"[KOREAN_FILTER] 최종 한국 조항 수: {len(korean_results)}")
+    # threshold 이상만 필터링
+    filtered_korean = [
+        kr for kr in korean_results 
+        if kr.score >= KOREAN_SCORE_THRESHOLD
+    ]
+    
+    # 필터링 결과가 0개면 최소 1개는 보장
+    if not filtered_korean and korean_results:
+        filtered_korean = korean_results[:1]
+        print(f"[KOREAN_FILTER] 모든 조항이 threshold({KOREAN_SCORE_THRESHOLD}) 미만 - 최고점만 유지: {filtered_korean[0].display_path} (score: {filtered_korean[0].score:.3f})")
+    else:
+        removed_count = len(korean_results) - len(filtered_korean)
+        if removed_count > 0:
+            print(f"[KOREAN_FILTER] {removed_count}개 조항 제거 (threshold: {KOREAN_SCORE_THRESHOLD})")
+            print(f"[KOREAN_FILTER] 유지된 조항: {[kr.display_path for kr in filtered_korean]}")
+            print(f"[KOREAN_FILTER] 점수: {[f'{kr.score:.3f}' for kr in filtered_korean]}")
+    
+    # request.korean_top_k 제한
+    korean_results = filtered_korean[:request.korean_top_k]
+    
+    print(f"[KOREAN_FILTER] 최종 한국 조항 수: {len(korean_results)}")
 
     # ========== 2. 외국 헌법 풀 검색 ==========
     foreign_pool_raw = hybrid_search(
@@ -1874,7 +1874,7 @@ async def comparative_search(request: ComparativeSearchRequest):
                 # LLM 호출
                 summary = await _call_vllm_completion(
                     prompt=prompt,
-                    max_tokens=320,
+                    max_tokens=512,
                     temperature=0.3
                 )
                 
