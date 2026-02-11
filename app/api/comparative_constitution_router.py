@@ -2305,7 +2305,8 @@ def build_country_summary_prompt(
     korean_section = "\n\n".join(korean_blocks).strip()
 
     # 외국 조항들
-    foreign_blocks = [_format_item(it, prefix="FX", limit=350) for it in (foreign_items or [])]
+    fx_prefix = (foreign_country or "FX").upper()
+    foreign_blocks = [_format_item(it, prefix=fx_prefix, limit=350) for it in (foreign_items or [])]
     foreign_section = "\n\n".join(foreign_blocks).strip()
 
     prompt = f"""당신은 헌법 비교 분석가입니다.
@@ -2313,7 +2314,7 @@ def build_country_summary_prompt(
 [중요 규칙 - 반드시 준수]
 - 아래에 제공된 "한국 헌법 조항 텍스트"와 "{foreign_country_name} 헌법 조항 텍스트"만 근거로 사용하세요.
 - 제공되지 않은 조항 번호/내용을 추측하거나 외부 지식을 섞지 마세요.
-- 조항 번호/표기는 각 블록의 제목(예: KR:제10조, FX:Article 3 또는 FX:<display_path>)에 실제로 존재하는 것만 사용하세요.
+- 조항 번호/표기는 각 블록의 제목(예: KR:제10조, {fx_prefix}:Article 3 또는 {fx_prefix}:<display_path>)에 실제로 존재하는 것만 사용하세요.
 - 금지: "(요청하신 ...)", "---", "요약:", "출력:", "결론:", "다음과 같습니다", "확인할 수 있습니다" 같은 메타 문구/장식/라벨.
 - 바로 본문만 출력하세요. (머리말/인사/라벨/구분선/괄호 제목 금지)
 - 5~8문장, 불릿/번호매기기 금지.
@@ -2325,9 +2326,9 @@ def build_country_summary_prompt(
 
 [출력 형식]
 - 총 5~8문장으로만 작성.
-- 각 문장 끝에 근거 태그를 반드시 붙이세요: (KR:<조항> / FX:<조항>)
-  예) ...입니다. (KR:제10조 / FX:Article 3)
-- 만약 외국 조항의 번호/표기가 확실하지 않으면 "FX:미상"으로 표기하고, 번호를 만들어내지 마세요.
+- 각 문장 끝에 근거 태그를 반드시 붙이세요: (KR:<조항> / {fx_prefix}:<조항>)
+  예) ...입니다. (KR:제10조 / {fx_prefix}:Article 3)
+- 만약 외국 조항의 번호/표기가 확실하지 않으면 "{fx_prefix}:미상"으로 표기하고, 번호를 만들어내지 마세요.
 - 한국도 동일하게 불확실하면 "KR:미상"을 사용하세요.
 
 ## 한국 헌법 조항 텍스트 ({len(korean_items)}개)
