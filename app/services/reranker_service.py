@@ -36,28 +36,6 @@ def rerank(
     top_k: int = 5,
     batch_size: int = None
 ) -> List[Dict[str, Any]]:
-    """
-    검색 결과 리랭킹
-    
-    Args:
-        query: 검색 쿼리
-        cands: 후보 청크 리스트
-            각 항목은 {'chunk': str, 'score': float, 'metadata': dict} 형태
-        top_k: 반환할 상위 개수
-        batch_size: 배치 크기 (None이면 환경변수 사용)
-    
-    Returns:
-        리랭킹된 상위 top_k개 청크 리스트
-        각 항목에 're_score' 필드 추가
-    
-    Example:
-        >>> cands = [
-        ...     {"chunk": "제10조 내용", "score": 0.72, "metadata": {...}},
-        ...     {"chunk": "제11조 내용", "score": 0.65, "metadata": {...}},
-        ... ]
-        >>> reranked = rerank("인간의 존엄", cands, top_k=5)
-        >>> print(reranked[0]['re_score'])  # 0.92
-    """
     if not cands:
         return []
     

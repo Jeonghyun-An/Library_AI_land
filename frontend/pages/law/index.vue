@@ -470,9 +470,7 @@
               </div>
 
               <!-- 요약 텍스트 -->
-              <div v-else class="summary_txt">
-                {{ countrySummary.summary }}
-              </div>
+              <div v-else class="summary_txt" v-html="countrySummaryHtml"></div>
             </div>
 
             <!-- 국가 선택 + PDF 뷰어 -->
@@ -936,6 +934,7 @@ const _lastForeign = ref({ docId: null, page: null, koreanIndex: null });
 
 const countrySummary = ref(null);
 const isGeneratingSummary = ref(false);
+const SCORE_THRESHOLD = 0.1; // 10%
 
 // ==================== 국기 관련 유틸리티 ====================
 /**
@@ -1223,6 +1222,17 @@ function onForeignHighlightClick(result) {
 }
 
 // ==================== Computed ====================
+const countrySummaryHtml = computed(() => {
+  const s = countrySummary.value?.summary || "";
+  if (!s) return "";
+
+  const withBreaks = s
+    .replace(/\)\.(\s*)(?!\n|<br>)/g, ").\n") // ). 뒤에 줄바꿈
+    .replace(/\n/g, "<br>");
+
+  return withBreaks;
+});
+
 const groupedHistory = computed(() => {
   const groups = {};
   searchHistory.value.forEach((item) => {
@@ -1238,8 +1248,9 @@ const koreanResults = computed(() => {
     return [];
   }
 
-  // 모든 pairs에서 korean 결과 추출
-  const results = searchResult.value.pairs.map((pair) => pair.korean);
+  const results = searchResult.value.pairs
+    .map((pair) => pair.korean)
+    .filter((r) => (r?.display_score ?? 0) >= SCORE_THRESHOLD);
 
   return results;
 });
@@ -1329,7 +1340,10 @@ const displayedForeignResults = computed(() => {
 
   const countryData =
     foreignResultsByCountry.value[selectedForeignCountry.value];
-  const results = countryData?.items || [];
+
+  const results = (countryData?.items || []).filter(
+    (r) => (r?.display_score ?? 0) >= SCORE_THRESHOLD,
+  );
 
   console.log(`[displayedForeignResults] 결과:`, {
     country: selectedForeignCountry.value,
