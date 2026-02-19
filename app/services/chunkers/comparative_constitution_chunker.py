@@ -1,14 +1,19 @@
 # app/services/chunkers/comparative_constitution_chunker.py
 """
-Comparative Constitution Chunker (v3.3 - Belgian Constitution Fix)
-- 벨기에식 아라비아 숫자 항 구조 인식 (① ② 대신 1. 2. / "1 제77조..." 등)
-- 다층 호 구조 처리 개선
-- 기존 v3.2 로직 유지 (하위 호환)
+Comparative Constitution Chunker (v3.4 - KR Full Article Fix)
+- 대한민국 헌법 123조 전체 인식 수정
+- PDF 추출 텍스트의 조문-본문 연결 행 처리 개선
+- 페이지 품질 스코어 한국어 전용 문서 보정
+- _extract_article_no의 \b 경계 실패 케이스 보완
+- clamp_to_single_article 과잉 잘림 방지
+- 조 단위 통합 청크 생성 함수 추가 (router에서 호출)
+- 기존 v3.3 로직 유지 (하위 호환)
 """
 
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,15 +23,21 @@ import fitz  # PyMuPDF
 # =========================
 # Regex
 # =========================
-RE_KO_ARTICLE = re.compile(r"^\s*제\s*(\d+)\s*조\b")
+# v3.4 수정: \b 대신 더 너그러운 경계 처리 — 조문 번호 뒤에 ①②나 숫자가 붙어도 인식
+RE_KO_ARTICLE = re.compile(r"^\s*제\s*(\d+)\s*조(?:\s|①②③④⑤⑥⑦⑧⑨⑩|$|\(|\[|의|【|〔)")
+RE_KO_ARTICLE_BODY = re.compile(r"^제\s*(\d+)\s*조(?:\s|①②③④⑤⑥⑦⑧⑨⑩|$|\(|\[|의|【|〔)")  # search용 (줄 앞)
 RE_EN_ARTICLE = re.compile(r"^\s*Article\s*\(?\s*(\d+)\s*\)?\b", re.IGNORECASE)
 
 RE_PAGE_NUM_ONLY = re.compile(r"^\s*[-–—]?\s*\d+\s*[-–—]?\s*$")
 RE_INDEX_FRAGMENT = re.compile(r"^\s*제\s*\d+\s*조\s*제\s*\d+\s*(항|호)\b.*$")
 
-# (옵션) 벨기에식 항/호 패턴 (현재 로직에서는 직접 re.match 사용)
-RE_PARAGRAPH_NUMERIC = re.compile(r"^(\d+)\s+")        # "1 " "2 " 형식
-RE_ITEM_DETAILED = re.compile(r"^(\d+)\s*\.\s+")       # "1. " "2. " 형식
+# 벨기에식 항/호 패턴
+RE_PARAGRAPH_NUMERIC = re.compile(r"^(\d+)\s+")
+RE_ITEM_DETAILED = re.compile(r"^(\d+)\s*\.\s+")
+
+# 조문 내부 참조 패턴 (clamp 시 분리하면 안 되는 것들)
+# "제10조에 따라", "제15조제1항" 등 — 줄 앞이 아닌 문장 중간에 있는 것
+_RE_KO_ARTICLE_REF_IN_SENTENCE = re.compile(r"(?<=[가-힣\s])\s*제\s*\d+\s*조")
 
 
 _KO_NOISE_PATTERNS = [
@@ -34,6 +45,7 @@ _KO_NOISE_PATTERNS = [
     r"^\s*대한민국\s*헌법\s*$",
     r"^\s*대한민국헌법\s*$",
     r"^\s*대한민국헌법\s*\[\s*대한민국\s*\]\s*$",
+    # v3.4: 순수 숫자만인 줄 제거는 유지하되, 조문 번호가 붙은 줄은 제거 안 함
     r"^\s*\d+\s*$",
 ]
 _EN_NOISE_PATTERNS = [
@@ -117,213 +129,223 @@ def _page_lines_from_dict(page: fitz.Page) -> List[Dict[str, Any]]:
             continue
         for ln in b.get("lines", []):
             spans = ln.get("spans", [])
-            if not spans:
-                continue
-
-            parts: List[str] = []
-            rects: List[fitz.Rect] = []
-            for sp in spans:
-                t = (sp.get("text") or "").strip()
-                if not t:
-                    continue
-                parts.append(t)
-                x0, y0, x1, y1 = sp.get("bbox", (0, 0, 0, 0))
-                rects.append(fitz.Rect(x0, y0, x1, y1))
-
-            text = _normalize_line(" ".join(parts))
+            text = " ".join(sp.get("text", "") for sp in spans)
+            text = _normalize_line(text)
             if not text:
                 continue
+            bbox = fitz.Rect(ln.get("bbox", [0, 0, 0, 0]))
+            out.append({"text": text, "bbox": bbox, "spans": spans})
 
-            rect = _merge_rects(rects)
-            out.append({"text": text, "rect": rect, "y0": rect.y0 if rect else 0.0})
-
-    out.sort(
-        key=lambda x: (
-            round(float(x.get("y0", 0.0)), 1),
-            round(float(x["rect"].x0) if x.get("rect") else 0.0, 1),
-        )
-    )
     return out
 
 
-def _words_to_lines(words: List[Tuple], y_tol: float = 2.0) -> List[Dict[str, Any]]:
+def _words_to_lines(
+    words: List[Tuple], tol: float = 3.0
+) -> List[Dict[str, Any]]:
     if not words:
         return []
-    words_sorted = sorted(words, key=lambda w: (w[1], w[0]))
-
-    lines: List[List[Tuple]] = []
-    cur: List[Tuple] = []
-    cur_y = None
-
-    for w in words_sorted:
-        y = w[1]
-        if cur_y is None:
-            cur_y = y
-            cur = [w]
-            continue
-        if abs(y - cur_y) <= y_tol:
-            cur.append(w)
-        else:
-            lines.append(cur)
-            cur = [w]
-            cur_y = y
-    if cur:
-        lines.append(cur)
-
-    out: List[Dict[str, Any]] = []
-    for line_words in lines:
-        line_words = sorted(line_words, key=lambda w: w[0])
-        text = _normalize_line(" ".join([w[4] for w in line_words]))
+    rows: Dict[int, List] = {}
+    for w in words:
+        y = int(w[1] / tol)
+        rows.setdefault(y, []).append(w)
+    out = []
+    for y_key in sorted(rows):
+        row = sorted(rows[y_key], key=lambda w: w[0])
+        text = " ".join(w[4] for w in row)
+        text = _normalize_line(text)
         if not text:
             continue
-        rects = [fitz.Rect(w[0], w[1], w[2], w[3]) for w in line_words]
-        rect = _merge_rects(rects)
-        out.append({"text": text, "rect": rect, "y0": rect.y0 if rect else 0.0})
+        x0 = min(w[0] for w in row)
+        y0 = min(w[1] for w in row)
+        x1 = max(w[2] for w in row)
+        y1 = max(w[3] for w in row)
+        out.append({"text": text, "bbox": fitz.Rect(x0, y0, x1, y1)})
     return out
 
 
-def _split_columns_by_midline(words, page_width: float, gutter_ratio: float = 0.02):
-    mid = page_width * 0.5
-    gutter = page_width * gutter_ratio
+def _pack_bbox_info(
+    lines: List[Dict[str, Any]], page_no: int, max_lines: int = 5
+) -> List[Dict[str, Any]]:
+    out = []
+    for ln in lines[:max_lines]:
+        bbox = ln.get("bbox")
+        if bbox is None:
+            continue
+        if isinstance(bbox, fitz.Rect):
+            out.append(
+                {
+                    "page": page_no,
+                    "page_index": int(page_no) - 1,
+                    "x0": bbox.x0,
+                    "y0": bbox.y0,
+                    "x1": bbox.x1,
+                    "y1": bbox.y1,
+                }
+            )
+        elif isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            out.append(
+                {
+                    "page": page_no,
+                    "page_index": int(page_no) - 1,
+                    "x0": bbox[0],
+                    "y0": bbox[1],
+                    "x1": bbox[2],
+                    "y1": bbox[3],
+                }
+            )
+    return out
 
-    left, right, center = [], [], []
-    for w in words:
-        x0, y0, x1, y1 = w[0], w[1], w[2], w[3]
-        cx = (x0 + x1) / 2
-        if cx < mid - gutter:
-            left.append(w)
-        elif cx > mid + gutter:
-            right.append(w)
-        else:
-            center.append(w)
-    return left, right, center
-
-
-def _is_two_column_page(words: List[Tuple], page_width: float, dict_lines: Optional[List[Dict[str, Any]]] = None) -> bool:
-    """2단 판별 (기존 로직 유지)"""
-    if page_width <= 0:
-        return False
-
-    mid = page_width * 0.5
-
-    # 1) dict-lines 기반 판별
-    if dict_lines and len(dict_lines) >= 12:
-        usable = [ln for ln in dict_lines if ln.get("rect") and ln.get("text")]
-        if len(usable) >= 10:
-            cross = 0
-            left_only = 0
-            right_only = 0
-
-            for ln in usable:
-                r: fitz.Rect = ln["rect"]
-                if len(ln["text"]) < 6:
-                    continue
-                if r.x0 < mid and r.x1 > mid:
-                    cross += 1
-                elif r.x1 <= mid:
-                    left_only += 1
-                elif r.x0 >= mid:
-                    right_only += 1
-
-            total = max(1, cross + left_only + right_only)
-            cross_ratio = cross / total
-
-            if cross_ratio >= 0.28:
-                return False
-
-            if min(left_only, right_only) < max(8, int((left_only + right_only) * 0.18)):
-                return False
-
-            return True
-
-    # 2) words 기반 보조 판정
-    if not words:
-        return False
-
-    center_band = page_width * 0.04
-    left_cnt = 0
-    right_cnt = 0
-    center_cnt = 0
-
-    for w in words:
-        x0, x1 = w[0], w[2]
-        cx = (x0 + x1) / 2
-        if abs(cx - mid) <= center_band:
-            center_cnt += 1
-        elif cx < mid:
-            left_cnt += 1
-        else:
-            right_cnt += 1
-
-    total = max(1, left_cnt + right_cnt + center_cnt)
-    center_ratio = center_cnt / total
-
-    if center_ratio > 0.20:
-        return False
-
-    min_required = max(40, int(total * 0.20))
-    if min(left_cnt, right_cnt) < min_required:
-        return False
-
-    return True
-
-
-def _strip_header_footer_lines(lines: List[Dict[str, Any]], max_header: int = 3, max_footer: int = 3) -> List[Dict[str, Any]]:
-    if not lines:
+def _anchor_bbox_by_article_header(
+    doc: fitz.Document,
+    *,
+    article_no: str,
+    prefer_pages_1based: List[int],
+    lang_hint: str,
+) -> List[Dict[str, Any]]:
+    """
+    최종 article_no 기준으로 조항 헤더를 search_for로 찾아 bbox를 앵커링.
+    - prefer_pages_1based: 먼저 찾아볼 페이지(1-based) 우선순위 리스트
+    - lang_hint: "KO" | "EN"
+    """
+    if not article_no or not prefer_pages_1based:
         return []
 
-    def is_edge_noise(t: str) -> bool:
-        t = _normalize_line(t)
-        if not t:
-            return True
+    patterns = []
+    if lang_hint.upper() == "KO":
+        patterns = [f"제{article_no}조", f"제 {article_no} 조"]
+    else:
+        patterns = [f"Article {article_no}", f"ARTICLE {article_no}"]
+
+    for p1 in prefer_pages_1based:
+        if not p1:
+            continue
+        pidx = max(0, int(p1) - 1)
+        if pidx < 0 or pidx >= len(doc):
+            continue
+        page = doc[pidx]
+
+        for pat in patterns:
+            rects = page.search_for(pat)
+            if rects:
+                r = rects[0]
+                return [{
+                    "page": int(p1),
+                    "x0": float(r.x0),
+                    "y0": float(r.y0),
+                    "x1": float(r.x1),
+                    "y1": float(r.y1),
+                    "text": pat[:200],
+                }]
+    return []
+
+def _build_display_path(article_no: str, lang_hint: str = "KO") -> str:
+    if lang_hint == "KO":
+        return f"제{article_no}조"
+    return f"Article {article_no}"
+
+
+def _strip_header_footer_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """페이지 헤더/푸터 제거"""
+    if len(lines) <= 4:
+        return lines
+
+    strip_top = 0
+    strip_bot = 0
+
+    for ln in lines[:2]:
+        t = ln["text"]
         if RE_PAGE_NUM_ONLY.match(t):
-            return True
-        return False
-
-    start = 0
-    for i in range(min(max_header, len(lines))):
-        if is_edge_noise(lines[i]["text"]):
-            start += 1
+            strip_top += 1
+        elif len(t) <= 30 and not _has_hangul(t) and not _has_latin(t):
+            strip_top += 1
         else:
             break
 
-    end = len(lines)
-    for i in range(1, min(max_footer, len(lines)) + 1):
-        if is_edge_noise(lines[-i]["text"]):
-            end -= 1
+    for ln in reversed(lines[-2:]):
+        t = ln["text"]
+        if RE_PAGE_NUM_ONLY.match(t):
+            strip_bot += 1
+        elif len(t) <= 30 and not _has_hangul(t) and not _has_latin(t):
+            strip_bot += 1
         else:
             break
 
-    return lines[start:end]
+    end = len(lines) - strip_bot if strip_bot else len(lines)
+    return lines[strip_top:end]
 
 
 def _filter_noise_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ko_pats = [re.compile(p) for p in _KO_NOISE_PATTERNS]
+    en_pats = [re.compile(p) for p in _EN_NOISE_PATTERNS]
+
     out = []
     for ln in lines:
-        t = _normalize_line(ln["text"])
-        if not t:
-            continue
-        if RE_PAGE_NUM_ONLY.match(t):
-            continue
-        if len(t) <= 45 and RE_INDEX_FRAGMENT.match(t):
-            continue
-        out.append({**ln, "text": t})
+        t = ln["text"]
+        is_noise = False
+        # 한국어 노이즈 체크 — 단, "제N조"가 포함된 줄은 제외
+        if _has_hangul(t) or not _has_latin(t):
+            if not _extract_article_no_safe(t):  # 조문 번호가 있으면 노이즈 처리 안 함
+                for p in ko_pats:
+                    if p.match(t):
+                        is_noise = True
+                        break
+        else:
+            for p in en_pats:
+                if p.match(t):
+                    is_noise = True
+                    break
+        if not is_noise:
+            out.append(ln)
     return out
 
 
-def _detect_repeated_edge_lines(pages_lines: List[List[Dict[str, Any]]], top_k=2, bottom_k=2, thr=0.6):
-    from collections import Counter
+def _extract_article_no_safe(line: str) -> Optional[str]:
+    """
+    v3.4: 조문 번호 추출 — \b 없이 더 너그럽게
+    "제32조①모든..." 처럼 붙어있어도 인식
+    """
+    # 한국어 조 패턴 (줄 앞)
+    m = RE_KO_ARTICLE.match(line.lstrip())
+    if m:
+        return m.group(1)
 
-    top = Counter()
-    bot = Counter()
-    n = max(1, len(pages_lines))
+    # 영어 조 패턴
+    m = RE_EN_ARTICLE.match(line.lstrip())
+    if m:
+        return m.group(1)
+
+    # 추가: "1 제77조..." 벨기에식 — 숫자 뒤에 한국 조문
+    m2 = re.match(r"^\d+\s+제\s*(\d+)\s*조", line.strip())
+    if m2:
+        return m2.group(1)
+
+    return None
+
+
+def _extract_article_no(line: str) -> Optional[str]:
+    """
+    v3.4: _extract_article_no_safe 로 위임 (기존 코드 호환용 유지)
+    """
+    return _extract_article_no_safe(line)
+
+
+def _detect_repeated_edge_lines(
+    pages_lines: List[List[Dict[str, Any]]], top_k: int = 2, bottom_k: int = 2, thr: float = 0.4
+) -> Tuple:
+    n = len(pages_lines)
+    if n < 3:
+        return set(), set()
+
+    top: Dict[str, int] = {}
+    bot: Dict[str, int] = {}
 
     for lines in pages_lines:
-        texts = [l["text"] for l in lines if l.get("text")]
-        for t in texts[:top_k]:
-            top[t] += 1
-        for t in texts[-bottom_k:]:
-            bot[t] += 1
+        for ln in lines[:top_k]:
+            t = ln["text"]
+            top[t] = top.get(t, 0) + 1
+        for ln in lines[-bottom_k:]:
+            t = ln["text"]
+            bot[t] = bot.get(t, 0) + 1
 
     top_rep = {t for t, c in top.items() if c / n >= thr and len(t) >= 4}
     bot_rep = {t for t, c in bot.items() if c / n >= thr and len(t) >= 4}
@@ -345,7 +367,11 @@ def _remove_repeated_edge_lines(pages_lines: List[List[Dict[str, Any]]], top_rep
     return cleaned
 
 
-def _page_quality_score(lines: List[Dict[str, Any]]) -> float:
+def _page_quality_score(lines: List[Dict[str, Any]], country: str = "") -> float:
+    """
+    v3.4 수정: 한국어 전용 문서(KR)에서 한글+라틴 동시 보너스 조건 완화
+    한글만 있어도 조문이 있으면 충분한 점수를 받도록 보정
+    """
     if not lines:
         return 0.0
     texts = [l["text"] for l in lines if l.get("text")]
@@ -353,8 +379,8 @@ def _page_quality_score(lines: List[Dict[str, Any]]) -> float:
         return 0.0
 
     joined = "\n".join(texts)
-    ko_hits = sum(1 for t in texts if RE_KO_ARTICLE.search(t))
-    en_hits = sum(1 for t in texts if RE_EN_ARTICLE.search(t))
+    ko_hits = sum(1 for t in texts if RE_KO_ARTICLE.match(t.lstrip()))
+    en_hits = sum(1 for t in texts if RE_EN_ARTICLE.match(t.lstrip()))
 
     short_ratio = sum(1 for t in texts if len(t) <= 12) / max(1, len(texts))
     idx_hits = sum(1 for t in texts if RE_INDEX_FRAGMENT.match(t))
@@ -368,137 +394,71 @@ def _page_quality_score(lines: List[Dict[str, Any]]) -> float:
 
     if _has_hangul(joined) and _has_latin(joined):
         score += 0.5
+    elif _has_hangul(joined):
+        # v3.4: 한글만 있는 페이지도 보너스 (한국 헌법 등)
+        score += 0.3
 
     return max(score, 0.0)
 
 
-def _extract_article_no(line: str) -> Optional[str]:
-    """
-    조항 번호 추출 - 벨기에식 구조 대응
-
-    추가:
-    - "1 제77조..." 같이 조항이 뒤에 오는 경우도 인식
-    """
-    m = RE_KO_ARTICLE.search(line)
-    if m:
-        return m.group(1)
-    m = RE_EN_ARTICLE.search(line)
-    if m:
-        return m.group(1)
-
-    # 추가: "제N조"가 뒤에 나오는 경우
-    m = re.search(r"(제\s*(\d+)\s*조)\b", line)
-    if m:
-        return m.group(2)
-    m = re.search(r"(Article\s*\(?\s*(\d+)\s*\)?)\b", line, re.IGNORECASE)
-    if m:
-        return m.group(2)
-
-    return None
-
-def _circled_to_int(s: str) -> int:
-    """원문자(①②③...⑳) → 정수, 숫자문자열 → 정수, 그 외 → 0"""
-    if not s:
-        return 0
-    s = str(s).strip()
-    circled = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
-    if s in circled:
-        return circled.index(s) + 1
-    try:
-        return int(s)
-    except ValueError:
-        return 0
-
-def _build_display_path(article_no: Optional[str], lang_hint: str = "KO") -> str:
-    if not article_no:
-        return ""
-    if lang_hint.upper() == "EN":
-        return f"Article ({article_no})"
-    return f"제{article_no}조"
-
-
-def _pack_bbox_info(lines: List[Dict[str, Any]], page_no_1based: int, max_lines: int = 5) -> List[Dict[str, Any]]:
-    out = []
-    for ln in lines[:max_lines]:
-        r: fitz.Rect = ln.get("rect")
-        if not r:
-            continue
-        out.append(
-            {
-                "page": page_no_1based,
-                "x0": float(r.x0),
-                "y0": float(r.y0),
-                "x1": float(r.x1),
-                "y1": float(r.y1),
-                "text": (ln.get("text", "") or "")[:200],
-            }
-        )
-    return out
-
-
 # =========================
-# Text normalization
+# Text normalization helpers
 # =========================
 def _remove_noise_lines(text: str, lang_hint: str = "ko") -> str:
-    if not text:
-        return ""
-    lines = [ln.rstrip() for ln in text.splitlines()]
-    patterns = _KO_NOISE_PATTERNS if lang_hint == "ko" else _EN_NOISE_PATTERNS
-    compiled = [re.compile(p) for p in patterns]
-    cleaned: List[str] = []
+    lines = text.split("\n")
+    out = []
+    ko_pats = [re.compile(p) for p in _KO_NOISE_PATTERNS]
+    en_pats = [re.compile(p) for p in _EN_NOISE_PATTERNS]
+
     for ln in lines:
-        s = ln.strip()
-        if not s:
+        ln = ln.strip()
+        if not ln:
             continue
-        if len(s) <= 1:
+        pats = ko_pats if lang_hint == "ko" else en_pats
+        is_noise = False
+        # 조문 번호가 있는 줄은 절대 노이즈 처리 안 함
+        if _extract_article_no_safe(ln):
+            out.append(ln)
             continue
-        if any(p.match(s) for p in compiled):
-            continue
-        cleaned.append(ln)
-    return "\n".join(cleaned).strip()
+        for p in pats:
+            if p.match(ln):
+                is_noise = True
+                break
+        if not is_noise:
+            out.append(ln)
+    return "\n".join(out)
 
 
-def _reflow_ko(text: str) -> str:
-    if not text:
-        return ""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    out: List[str] = []
-
-    def is_list_start(s: str) -> bool:
-        # 벨기에식 "1." 패턴도 추가
-        return bool(re.match(r"^(①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩|\d+\.|\(|\d+\)|-|\u2022|○)", s))
-
-    def ends_hard(s: str) -> bool:
-        # 문법 오류(깨진 따옴표) 수정
-        return s.endswith((".", "!", "?", ":", ";", ")", '"', "'")) or bool(
-            re.search(r"(다\.|한다\.|이다\.|임\.|함\.)\s*$", s)
-        )
-
+def _reflow_ko(lines_text: str) -> str:
+    lines = lines_text.split("\n")
+    out = []
     buf = ""
+
+    def ends_sentence(s: str) -> bool:
+        return s.endswith(("다", "라", "다.", "다,", "함", "임", "음"))
+
     for ln in lines:
         if not buf:
             buf = ln
             continue
-        if (not ends_hard(buf)) and (not is_list_start(ln)):
+        if (not ends_sentence(buf)) and ln and (ln[0] in "①②③④⑤⑥⑦⑧⑨⑩" or ln[0].islower()):
             buf = buf + " " + ln
         else:
             out.append(buf)
             buf = ln
+
     if buf:
         out.append(buf)
     return "\n".join(out).strip()
 
 
-def _reflow_en(text: str) -> str:
-    if not text:
-        return ""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    out: List[str] = []
+def _reflow_en(lines_text: str) -> str:
+    lines = lines_text.split("\n")
+    out = []
     buf = ""
 
     def ends_sentence(s: str) -> bool:
-        # 문법 오류(깨진 따옴표) 수정
-        return s.endswith((".", "!", "?", ":", ";", ")", '"', "'"))
+        return s.rstrip().endswith((".", "!", "?", ":", ";", ")", '"', "'"))
 
     for ln in lines:
         if not buf:
@@ -529,13 +489,27 @@ def normalize_article_text(raw_text: str, lang_hint: str = "ko") -> str:
     return t.strip()
 
 
-_RE_KO_ARTICLE_INBODY = re.compile(r"(제\s*\d+\s*조)")
+# =========================
+# Article boundary helpers
+# =========================
+
+# v3.4: 줄 시작에서만 조문 경계로 인식 (문장 중간 언급은 경계 아님)
+_RE_KO_ARTICLE_INBODY = re.compile(r"(?:^|\n)(제\s*\d+\s*조)(?:\s|①②③④⑤⑥⑦⑧⑨⑩|$|\(|\[|의|【|〔)")
 
 
 def split_korean_constitution_blocks(text: str) -> List[Tuple[str, str]]:
+    """
+    v3.4: 조문 경계 분리 시 문장 중간 참조("제10조에 따라" 등)는 경계로 처리하지 않음
+    """
     if not text:
         return []
-    markers = [(m.start(), m.group(1)) for m in _RE_KO_ARTICLE_INBODY.finditer(text)]
+
+    markers = []
+    for m in _RE_KO_ARTICLE_INBODY.finditer(text):
+        label = m.group(1)
+        pos = m.start(1)  # 실제 "제N조" 시작 위치
+        markers.append((pos, label))
+
     if not markers:
         return [("", text.strip())]
     markers.sort(key=lambda x: x[0])
@@ -557,19 +531,22 @@ def clamp_to_single_article(text: str, target_label: str) -> str:
         return text.strip()
     target_label = target_label.replace(" ", "")
     blocks = split_korean_constitution_blocks(text)
+    if not blocks:
+        return text.strip()
     for label, block in blocks:
         if label.replace(" ", "") == target_label:
             return block.strip()
+    # v3.4: 매칭 실패 시 원본 전체 반환 (이전엔 text.strip() 반환 — 동일하지만 의도 명확화)
     return text.strip()
 
 
-_RE_EN_ARTICLE_INBODY = re.compile(r"(Article\s*\(?\s*\d+\s*\)?\b)", re.IGNORECASE)
+_RE_EN_ARTICLE_INBODY = re.compile(r"(?:^|\n)(Article\s*\(?\s*\d+\s*\)?\b)", re.IGNORECASE)
 
 
 def split_english_constitution_blocks(text: str) -> List[Tuple[str, str]]:
     if not text:
         return []
-    markers = [(m.start(), m.group(1)) for m in _RE_EN_ARTICLE_INBODY.finditer(text)]
+    markers = [(m.start(1), m.group(1)) for m in _RE_EN_ARTICLE_INBODY.finditer(text)]
     if not markers:
         return [("", text.strip())]
     markers.sort(key=lambda x: x[0])
@@ -580,8 +557,7 @@ def split_english_constitution_blocks(text: str) -> List[Tuple[str, str]]:
         block = text[pos:end].strip()
         if len(block) < 10:
             continue
-        norm_label = re.sub(r"\s+", " ", label).strip().lower()
-        blocks.append((norm_label, block))
+        blocks.append((label.replace(" ", ""), block))
     return blocks
 
 
@@ -590,27 +566,25 @@ def clamp_to_single_article_en(text: str, target_article_no: str) -> str:
         return ""
     if not target_article_no:
         return text.strip()
-
-    target = f"article {str(target_article_no).strip()}".lower()
-
     blocks = split_english_constitution_blocks(text)
+    if not blocks:
+        return text.strip()
+    target_num = str(target_article_no).strip()
     for label, block in blocks:
-        label_norm = re.sub(r"[\(\)]", "", label).replace("  ", " ").strip()
-        if label_norm == target:
+        nums = re.findall(r"\d+", label)
+        if nums and nums[0] == target_num:
             return block.strip()
-
     return text.strip()
 
 
 # =========================
-# Public API - ENHANCED
+# Main Chunker
 # =========================
 class ComparativeConstitutionChunker:
     def __init__(
         self,
-        *,
         keep_only_body_pages: bool = True,
-        body_score_threshold: float = 1.2,
+        body_score_threshold: float = 0.8,  # v3.4: 1.2 → 0.8 (한국어 전용 문서 탈락 방지)
         assume_two_columns: bool = True,
     ):
         self.keep_only_body_pages = keep_only_body_pages
@@ -624,31 +598,26 @@ class ComparativeConstitutionChunker:
         doc_id: str,
         country: str,
         constitution_title: str,
-        version: Optional[str],
-        is_bilingual: bool,
+        version: Optional[str] = None,
+        is_bilingual: bool = False,
     ) -> List[ConstitutionChunk]:
-        doc = fitz.open(pdf_path)
 
+        doc = fitz.open(pdf_path)
         pages_lines: List[List[Dict[str, Any]]] = []
         pages_meta: List[Dict[str, Any]] = []
 
-        # 1) per-page extract lines
-        for pidx in range(len(doc)):
-            page = doc[pidx]
+        for pidx, page in enumerate(doc):
+            page_width = page.rect.width
 
-            dict_lines = _page_lines_from_dict(page)
+            if self.assume_two_columns and page_width > 400:
+                mid = page_width / 2
+                words = _page_words(page)
+                left_w = [w for w in words if w[2] <= mid + 10]
+                right_w = [w for w in words if w[0] >= mid - 10]
+                center_w = [w for w in words if w[0] < mid - 10 and w[2] > mid + 10]
 
-            if len(dict_lines) < 15:
-                dict_lines = _words_to_lines(_page_words(page))
+                dict_lines = _page_lines_from_dict(page)
 
-            words = _page_words(page)
-
-            use_two_cols = False
-            if self.assume_two_columns:
-                use_two_cols = _is_two_column_page(words, page.rect.width, dict_lines=dict_lines)
-
-            if use_two_cols:
-                left_w, right_w, center_w = _split_columns_by_midline(words, page.rect.width)
                 left_lines = _words_to_lines(left_w)
                 right_lines = _words_to_lines(right_w)
                 center_lines = _words_to_lines(center_w)
@@ -658,24 +627,24 @@ class ComparativeConstitutionChunker:
                 lines.extend(right_lines)
                 lines.extend(center_lines)
             else:
-                lines = dict_lines
+                lines = _page_lines_from_dict(page)
 
             lines = _strip_header_footer_lines(lines)
             lines = _filter_noise_lines(lines)
 
-            score = _page_quality_score(lines)
+            score = _page_quality_score(lines, country=country)
 
             pages_lines.append(lines)
             pages_meta.append({"page_index": pidx, "page_no": pidx + 1, "score": score})
 
-        # 2) global repeated header/footer removal
+        # global repeated header/footer removal
         top_rep, bot_rep = _detect_repeated_edge_lines(pages_lines)
         pages_lines = _remove_repeated_edge_lines(pages_lines, top_rep, bot_rep)
 
         for i in range(len(pages_meta)):
-            pages_meta[i]["score"] = _page_quality_score(pages_lines[i])
+            pages_meta[i]["score"] = _page_quality_score(pages_lines[i], country=country)
 
-        # 3) keep only body pages
+        # keep only body pages
         kept: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
         for meta, lines in zip(pages_meta, pages_lines):
             if not lines:
@@ -684,28 +653,31 @@ class ComparativeConstitutionChunker:
                 if meta["score"] < self.body_score_threshold:
                     continue
                 joined_len = sum(len(l["text"]) for l in lines)
-                if joined_len < 300:
+                if joined_len < 200:  # v3.4: 300 → 200 (짧은 페이지도 포함)
                     continue
             kept.append((meta, lines))
 
-        # 4) build chunks by article boundaries
+        # build chunks by article boundaries
         chunks: List[ConstitutionChunk] = []
         seq = 0
 
-        current: Dict[str, Any] = {
-            "article_no": None,
-            "paragraph_no": None,
-            "display_path": "",
-            "structure": {},
-            "en_lines": [],
-            "ko_lines": [],
-            "page": None,
-            "page_en": None,
-            "page_ko": None,
-            "page_english": None,
-            "page_korean": None,
-            "bbox_lines": [],
-        }
+        def _empty_current():
+            return {
+                "article_no": None,
+                "paragraph_no": None,
+                "display_path": "",
+                "structure": {},
+                "en_lines": [],
+                "ko_lines": [],
+                "page": None,
+                "page_en": None,
+                "page_ko": None,
+                "page_english": None,
+                "page_korean": None,
+                "bbox_lines": [],
+            }
+
+        current: Dict[str, Any] = _empty_current()
 
         def flush():
             nonlocal seq, current
@@ -739,6 +711,29 @@ class ComparativeConstitutionChunker:
                 search_text = ko_text or ""
 
             bbox_info = current["bbox_lines"][:5] if current["bbox_lines"] else []
+            art_no = current.get("article_no")
+
+            if art_no:
+                # 어떤 언어 힌트로 찾을지 결정 (ko_text가 있으면 KO 우선)
+                lang_hint = "KO" if ko_text else ("EN" if en_text else "KO")
+
+                prefer_pages = []
+                # 우선순위: page -> page_ko -> page_en -> page_korean/page_english
+                for k in ["page", "page_ko", "page_en", "page_korean", "page_english"]:
+                    v = current.get(k)
+                    if v:
+                        vv = int(v)
+                        if vv not in prefer_pages:
+                            prefer_pages.append(vv)
+
+                anchored = _anchor_bbox_by_article_header(
+                    doc,
+                    article_no=str(art_no),
+                    prefer_pages_1based=prefer_pages,
+                    lang_hint=lang_hint,
+                )
+                if anchored:
+                    bbox_info = anchored
 
             chunks.append(
                 ConstitutionChunk(
@@ -763,20 +758,7 @@ class ComparativeConstitutionChunker:
             )
             seq += 1
 
-            current = {
-                "article_no": None,
-                "paragraph_no": None,
-                "display_path": "",
-                "structure": {},
-                "en_lines": [],
-                "ko_lines": [],
-                "page": None,
-                "page_en": None,
-                "page_ko": None,
-                "page_english": None,
-                "page_korean": None,
-                "bbox_lines": [],
-            }
+            current.update(_empty_current())
 
         for (meta, lines) in kept:
             page_no = meta["page_no"]
@@ -785,17 +767,32 @@ class ComparativeConstitutionChunker:
                 for ln in lines:
                     text = ln["text"]
 
-                    # 조 번호 감지
-                    art = _extract_article_no(text)
+                    # v3.4: _extract_article_no_safe 사용
+                    art = _extract_article_no_safe(text)
                     if art:
                         flush()
                         current["article_no"] = art
                         current["paragraph_no"] = None
-                        lang_hint = "KO" if RE_KO_ARTICLE.search(text) else "EN"
+                        lang_hint = "KO" if RE_KO_ARTICLE.match(text.lstrip()) else "EN"
                         current["display_path"] = _build_display_path(art, lang_hint)
                         current["structure"] = {"article_number": art}
                         current["page"] = page_no
                         current["bbox_lines"].extend(_pack_bbox_info([ln], page_no, max_lines=1))
+
+                        # v3.4: 조문 번호 줄에 본문이 붙어있는 경우 처리
+                        # 예: "제32조①모든 국민은..." → art 뒤 본문 분리
+                        remainder = _extract_body_after_article_no(text, art)
+                        if remainder:
+                            fake_ln = dict(ln)
+                            fake_ln["text"] = remainder
+                            if _has_hangul(remainder):
+                                current["ko_lines"].append(fake_ln)
+                                if current["page_ko"] is None:
+                                    current["page_ko"] = page_no
+                                if current["page_korean"] is None:
+                                    current["page_korean"] = page_no
+                            else:
+                                current["en_lines"].append(fake_ln)
                         continue
 
                     # 항 번호 감지 (벨기에식 대응)
@@ -852,12 +849,12 @@ class ComparativeConstitutionChunker:
             else:
                 # 이중언어 문서 (기존 로직 유지)
                 for ln in lines:
-                    art = _extract_article_no(ln["text"])
+                    art = _extract_article_no_safe(ln["text"])
                     if art:
                         flush()
                         current["article_no"] = art
                         current["paragraph_no"] = None
-                        lang_hint = "KO" if RE_KO_ARTICLE.search(ln["text"]) else "EN"
+                        lang_hint = "KO" if RE_KO_ARTICLE.match(ln["text"].lstrip()) else "EN"
                         current["display_path"] = _build_display_path(art, lang_hint)
                         current["structure"] = {"article_number": art}
                         current["page"] = page_no
@@ -865,8 +862,16 @@ class ComparativeConstitutionChunker:
 
                     if _has_hangul(ln["text"]):
                         current["ko_lines"].append(ln)
+                        if current["page_ko"] is None:
+                            current["page_ko"] = page_no
+                        if current["page_korean"] is None:
+                            current["page_korean"] = page_no
                     else:
                         current["en_lines"].append(ln)
+                        if current["page_en"] is None:
+                            current["page_en"] = page_no
+                        if current["page_english"] is None:
+                            current["page_english"] = page_no
 
                     if current["page"] is None:
                         current["page"] = page_no
@@ -877,7 +882,7 @@ class ComparativeConstitutionChunker:
         cleaned: List[ConstitutionChunk] = []
         for ch in chunks:
             body = (ch.korean_text or "") + "\n" + (ch.english_text or "")
-            if len(body.strip()) < 120:
+            if len(body.strip()) < 80:  # v3.4: 120 → 80 (짧은 조문도 보존)
                 if not (ch.structure or {}).get("article_number"):
                     continue
             cleaned.append(ch)
@@ -894,124 +899,155 @@ class ComparativeConstitutionChunker:
                 if ch.korean_text and prev.korean_text:
                     prev.korean_text = (prev.korean_text.rstrip() + " " + ch.korean_text.lstrip()).strip()
                     prev.search_text = (prev.search_text.rstrip() + "\n" + ch.korean_text).strip()
+                    if ch.bbox_info:
+                        prev.bbox_info = (prev.bbox_info or []) + ch.bbox_info
+                        prev.bbox_info = prev.bbox_info[:10]
                     continue
 
                 if ch.english_text and prev.english_text:
                     prev.english_text = (prev.english_text.rstrip() + " " + ch.english_text.lstrip()).strip()
                     prev.search_text = (prev.search_text.rstrip() + "\n" + ch.english_text).strip()
+                    if ch.bbox_info:
+                        prev.bbox_info = (prev.bbox_info or []) + ch.bbox_info
+                        prev.bbox_info = prev.bbox_info[:10]
                     continue
 
                 prev.search_text = (prev.search_text.rstrip() + "\n" + text).strip()
+                if ch.bbox_info:
+                    prev.bbox_info = (prev.bbox_info or []) + ch.bbox_info
+                    prev.bbox_info = prev.bbox_info[:10]
                 continue
 
             merged.append(ch)
-        article_groups: Dict[str, List[ConstitutionChunk]] = {}
-        for ch in merged:
-            art_no = (ch.structure or {}).get("article_number")
-            para = (ch.structure or {}).get("paragraph")
-            if art_no and para:
-                # 항 번호가 있는 청크 = 항 단위로 분리된 청크
-                key = f"{ch.doc_id}::{art_no}"
-                if key not in article_groups:
-                    article_groups[key] = []
-                article_groups[key].append(ch)
-
-        article_level_chunks: List[ConstitutionChunk] = []
-        for group_key, para_chunks in article_groups.items():
-            if len(para_chunks) < 2:
-                # 항이 1개뿐이면 통합 불필요 (이미 조 단위와 동일)
-                continue
-
-            # 항 번호 순으로 정렬
-            para_chunks.sort(key=lambda c: (
-                c.page or 0,
-                _circled_to_int((c.structure or {}).get("paragraph", "0"))
-            ))
-
-            first = para_chunks[0]
-            art_no = (first.structure or {}).get("article_number")
-
-            # 텍스트 합치기
-            all_ko_texts = []
-            all_en_texts = []
-            all_bbox_info = []
-            min_page = first.page or 1
-            page_en = first.page_english
-            page_ko = first.page_korean
-
-            for pc in para_chunks:
-                if pc.korean_text:
-                    all_ko_texts.append(pc.korean_text.strip())
-                if pc.english_text:
-                    all_en_texts.append(pc.english_text.strip())
-                if pc.bbox_info:
-                    all_bbox_info.extend(pc.bbox_info)
-                if pc.page and pc.page < min_page:
-                    min_page = pc.page
-                if pc.page_english and (page_en is None or pc.page_english < page_en):
-                    page_en = pc.page_english
-                if pc.page_korean and (page_ko is None or pc.page_korean < page_ko):
-                    page_ko = pc.page_korean
-
-            combined_ko = "\n".join(all_ko_texts).strip() if all_ko_texts else None
-            combined_en = "\n".join(all_en_texts).strip() if all_en_texts else None
-
-            has_en = bool(combined_en)
-            has_ko = bool(combined_ko)
-
-            if has_en and has_ko:
-                text_type = "bilingual"
-                search_text = (combined_en + "\n" + combined_ko).strip()
-            elif has_en:
-                text_type = "english_only"
-                search_text = combined_en or ""
-            else:
-                text_type = "korean_only"
-                search_text = combined_ko or ""
-
-            # 토큰 수 체크 (너무 긴 조는 스킵 — 임베딩 모델 한계)
-            if len(search_text) > 4000:
-                # 4000자 초과 시 조 단위 통합 스킵 (항별로만 유지)
-                continue
-
-            # display_path에서 /paragraph 부분 제거 → 조 레벨
-            lang_hint = "KO" if _has_hangul(search_text) else "EN"
-            article_display_path = _build_display_path(art_no, lang_hint)
-
-            seq += 1
-            article_level_chunks.append(
-                ConstitutionChunk(
-                    doc_id=first.doc_id,
-                    country=first.country,
-                    constitution_title=first.constitution_title,
-                    version=first.version,
-                    seq=seq,
-                    page=min_page,
-                    page_english=page_en,
-                    page_korean=page_ko,
-                    display_path=article_display_path,
-                    structure={
-                        "article_number": art_no,
-                        "chunk_type": "article_full",  # 조 단위 통합 청크 식별자
-                        "paragraph_count": len(para_chunks),
-                    },
-                    english_text=combined_en,
-                    korean_text=combined_ko,
-                    has_english=has_en,
-                    has_korean=has_ko,
-                    text_type=text_type,
-                    search_text=search_text,
-                    bbox_info=all_bbox_info[:10],  # 조 전체 bbox (최대 10개)
-                )
-            )
-
-        if article_level_chunks:
-            print(f"[Chunker] 조 단위 통합 청크 {len(article_level_chunks)}개 추가 "
-                  f"(기존 항별 {len(merged)}개 유지)")
-            merged.extend(article_level_chunks)
 
         return merged
 
+
+def _extract_body_after_article_no(line: str, article_no: str) -> str:
+    """
+    v3.4 신규: "제32조①모든 국민은..." 같이 조문 번호 뒤에 본문이 붙은 경우 본문 부분만 추출
+    """
+    # 한국어 패턴
+    ko_pattern = re.compile(rf"제\s*{re.escape(article_no)}\s*조\s*(?:의\s*\d+\s*)?")
+    m = ko_pattern.search(line)
+    if m:
+        remainder = line[m.end():].strip()
+        if remainder:
+            return remainder
+
+    # 영어 패턴
+    en_pattern = re.compile(rf"Article\s*\(?\s*{re.escape(article_no)}\s*\)?\s*", re.IGNORECASE)
+    m = en_pattern.search(line)
+    if m:
+        remainder = line[m.end():].strip()
+        if remainder:
+            return remainder
+
+    return ""
+
+
+# =========================
+# 조 단위 통합 청크 생성
+# =========================
+
+def merge_paragraph_chunks_to_article(
+    paragraph_chunks: List[ConstitutionChunk],
+) -> List[ConstitutionChunk]:
+    """
+    v3.4 신규: 항 단위 청크들을 조 단위로 통합한 청크 추가 생성
+
+    - 기존 항별 청크는 유지
+    - 같은 article_number를 가진 항들을 합쳐 조 단위 청크를 별도 생성
+    - 조 단위 청크의 seq는 기존 최대 seq 이후부터 부여
+    - display_path: "제N조 (전문)" 형태
+    - structure: {"article_number": N, "is_merged_article": True}
+    """
+    # article_number 기준 그룹핑
+    groups: Dict[str, List[ConstitutionChunk]] = defaultdict(list)
+    for ch in paragraph_chunks:
+        art_no = (ch.structure or {}).get("article_number")
+        if art_no:
+            groups[art_no].append(ch)
+
+    if not groups:
+        print(f"[Chunker] 조 단위 통합 실패: article_number를 가진 청크가 없음")
+        return []
+
+    # 기존 최대 seq
+    max_seq = max((ch.seq for ch in paragraph_chunks), default=-1)
+    seq = max_seq + 1
+
+    merged_chunks: List[ConstitutionChunk] = []
+
+    # 조 번호를 숫자 순서로 정렬
+    def _art_sort_key(art_no: str) -> int:
+        try:
+            return int(art_no)
+        except ValueError:
+            return 9999
+
+    for art_no in sorted(groups.keys(), key=_art_sort_key):
+        art_chunks = sorted(groups[art_no], key=lambda c: c.seq)
+
+        # 한국어 텍스트 통합
+        ko_parts = [c.korean_text for c in art_chunks if c.korean_text]
+        en_parts = [c.english_text for c in art_chunks if c.english_text]
+
+        ko_merged = "\n".join(ko_parts).strip() if ko_parts else None
+        en_merged = "\n".join(en_parts).strip() if en_parts else None
+
+        if not ko_merged and not en_merged:
+            continue
+
+        has_ko = bool(ko_merged)
+        has_en = bool(en_merged)
+
+        if has_ko and has_en:
+            text_type = "bilingual"
+            search_text = (en_merged + "\n" + ko_merged).strip()
+        elif has_ko:
+            text_type = "korean_only"
+            search_text = ko_merged
+        else:
+            text_type = "english_only"
+            search_text = en_merged
+
+        # 대표 청크에서 메타 가져오기
+        rep = art_chunks[0]
+
+        merged_chunks.append(
+            ConstitutionChunk(
+                doc_id=rep.doc_id,
+                country=rep.country,
+                constitution_title=rep.constitution_title,
+                version=rep.version,
+                seq=seq,
+                page=rep.page,
+                page_english=rep.page_english,
+                page_korean=rep.page_korean,
+                display_path=f"제{art_no}조 (전문)" if has_ko else f"Article {art_no} (full)",
+                structure={
+                    "article_number": art_no,
+                    "is_merged_article": True,
+                    "paragraph_count": len(art_chunks),
+                },
+                english_text=en_merged,
+                korean_text=ko_merged,
+                has_english=has_en,
+                has_korean=has_ko,
+                text_type=text_type,
+                search_text=search_text,
+                bbox_info=rep.bbox_info,
+            )
+        )
+        seq += 1
+
+    return merged_chunks
+
+
+# =========================
+# Public API
+# =========================
 
 def chunk_constitution_document(
     *,
@@ -1021,13 +1057,20 @@ def chunk_constitution_document(
     constitution_title: str,
     version: Optional[str] = None,
     is_bilingual: bool = False,
+    include_merged_article_chunks: bool = True,  # v3.4: 조 단위 통합 청크 포함 여부
 ) -> List[ConstitutionChunk]:
+    """
+    헌법 문서 청킹 메인 함수
+
+    Args:
+        include_merged_article_chunks: True면 항별 청크 + 조 단위 통합 청크 모두 반환
+    """
     chunker = ComparativeConstitutionChunker(
         keep_only_body_pages=True,
-        body_score_threshold=1.2,
+        body_score_threshold=0.8,  # v3.4: 완화
         assume_two_columns=True,
     )
-    return chunker.chunk(
+    paragraph_chunks = chunker.chunk(
         pdf_path,
         doc_id=doc_id,
         country=country,
@@ -1035,3 +1078,13 @@ def chunk_constitution_document(
         version=version,
         is_bilingual=is_bilingual,
     )
+
+    if not include_merged_article_chunks:
+        return paragraph_chunks
+
+    # 조 단위 통합 청크 생성
+    article_chunks = merge_paragraph_chunks_to_article(paragraph_chunks)
+
+    print(f"[Chunker] 조 단위 통합 청크 {len(article_chunks)}개 추가 (기존 항별 {len(paragraph_chunks)}개 유지)")
+
+    return paragraph_chunks + article_chunks

@@ -295,6 +295,7 @@ export const usePdfJsOverlay = () => {
   const bboxToOverlayRect = (
     bbox: {
       page: number;
+      page_index?: number; // 0-based (optional)
       x0: number;
       y0: number;
       x1: number;
@@ -308,7 +309,14 @@ export const usePdfJsOverlay = () => {
       resultIndex: number;
     },
   ): OverlayRect | null => {
-    const pageInfo = pageInfoCache.value.get(bbox.page);
+    const pageNumber =
+      typeof bbox.page === "number" && bbox.page > 0
+        ? bbox.page
+        : typeof bbox.page_index === "number" && bbox.page_index >= 0
+          ? bbox.page_index + 1
+          : 0;
+
+    const pageInfo = pageInfoCache.value.get(pageNumber);
     if (!pageInfo || !pageInfo.canvasRect) return null;
 
     const cr = pageInfo.canvasRect;
@@ -339,7 +347,7 @@ export const usePdfJsOverlay = () => {
       top: absTop,
       width: localWidth,
       height: localHeight,
-      pageNumber: bbox.page,
+      pageNumber,
       score: meta.score,
       text: meta.text,
       articleLabel: meta.articleLabel,

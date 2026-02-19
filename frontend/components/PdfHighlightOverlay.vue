@@ -146,7 +146,7 @@ const highlightData = computed(() => {
     const validBboxes = bboxInfoRaw.filter(
       (b: any) =>
         b &&
-        typeof b.page === "number" &&
+        (typeof b.page === "number" || typeof b.page_index === "number") &&
         typeof b.x0 === "number" &&
         typeof b.y0 === "number" &&
         typeof b.x1 === "number" &&
