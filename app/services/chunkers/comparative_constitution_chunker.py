@@ -16,6 +16,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
+from math import inf
 
 import fitz  # PyMuPDF
 
@@ -46,7 +47,6 @@ _KO_NOISE_PATTERNS = [
     r"^\s*대한민국헌법\s*$",
     r"^\s*대한민국헌법\s*\[\s*대한민국\s*\]\s*$",
     # v3.4: 순수 숫자만인 줄 제거는 유지하되, 조문 번호가 붙은 줄은 제거 안 함
-    r"^\s*\d+\s*$",
 ]
 _EN_NOISE_PATTERNS = [
     r"^\s*Page\s+\d+\s*$",
@@ -195,6 +195,111 @@ def _pack_bbox_info(
             )
     return out
 
+def _union_bbox_info(
+    boxes: List[Dict[str, Any]],
+    *,
+    pad_x: float = 2.0,
+    pad_y: float = 2.0,
+) -> List[Dict[str, Any]]:
+    """
+    여러 bbox를 "페이지별"로 union해서 큰 박스로 만든 뒤,
+    페이지별 union 박스를 모두 반환한다. (페이지당 1개)
+    """
+    if not boxes:
+        return []
+
+    # page -> union rect
+    per_page: Dict[int, Dict[str, float]] = {}
+    for b in boxes:
+        try:
+            p = int(b.get("page", 0))
+            x0 = float(b.get("x0", 0.0))
+            y0 = float(b.get("y0", 0.0))
+            x1 = float(b.get("x1", 0.0))
+            y1 = float(b.get("y1", 0.0))
+        except Exception:
+            continue
+        if p <= 0:
+            continue
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        if p not in per_page:
+            per_page[p] = {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+        else:
+            u = per_page[p]
+            u["x0"] = min(u["x0"], x0)
+            u["y0"] = min(u["y0"], y0)
+            u["x1"] = max(u["x1"], x1)
+            u["y1"] = max(u["y1"], y1)
+
+    if not per_page:
+        return []
+
+    # padding 적용 + 가장 큰 박스 선택
+    out: List[Dict[str, Any]] = []
+    for p in sorted(per_page.keys()):
+        u = per_page[p]
+        x0 = u["x0"] - pad_x
+        y0 = u["y0"] - pad_y
+        x1 = u["x1"] + pad_x
+        y1 = u["y1"] + pad_y
+        if (x1 - x0) < 2.0 or (y1 - y0) < 2.0:
+            continue
+        out.append({
+            "page": p,
+            "page_index": int(p) - 1,
+            "x0": x0,
+            "y0": y0,
+            "x1": x1,
+            "y1": y1
+        })
+    return out
+def _accum_bbox(
+    acc: Dict[int, Dict[str, float]],
+    *,
+    page_no: int,
+    bbox: fitz.Rect,
+):
+    """
+    페이지별 bbox min/max 누적 (표/긴본문 100% 커버)
+    acc[page] = {x0,y0,x1,y1}
+    """
+    if not bbox:
+        return
+    if page_no <= 0:
+        return
+    x0, y0, x1, y1 = float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1)
+    if x1 <= x0 or y1 <= y0:
+        return
+
+    if page_no not in acc:
+        acc[page_no] = {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+    else:
+        u = acc[page_no]
+        u["x0"] = min(u["x0"], x0)
+        u["y0"] = min(u["y0"], y0)
+        u["x1"] = max(u["x1"], x1)
+        u["y1"] = max(u["y1"], y1)
+
+
+def _acc_to_boxes(acc: Dict[int, Dict[str, float]]) -> List[Dict[str, Any]]:
+    """누적 acc -> bbox_info 리스트로 변환"""
+    out: List[Dict[str, Any]] = []
+    for p in sorted(acc.keys()):
+        u = acc[p]
+        out.append(
+            {
+                "page": int(p),
+                "page_index": int(p) - 1,
+                "x0": float(u["x0"]),
+                "y0": float(u["y0"]),
+                "x1": float(u["x1"]),
+                "y1": float(u["y1"]),
+            }
+        )
+    return out
+
 def _anchor_bbox_by_article_header(
     doc: fitz.Document,
     *,
@@ -273,8 +378,9 @@ def _strip_header_footer_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, An
     end = len(lines) - strip_bot if strip_bot else len(lines)
     return lines[strip_top:end]
 
-
-def _filter_noise_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+RE_PURE_NUM_ONLY = re.compile(r"^\s*\d+\s*$")
+def _filter_noise_lines(lines: List[Dict[str, Any]], page_height: Optional[float] = None) -> List[Dict[str, Any]]:
+    ko_pats = [re.compile(p) for p in _KO_NOISE_PATTERNS]
     ko_pats = [re.compile(p) for p in _KO_NOISE_PATTERNS]
     en_pats = [re.compile(p) for p in _EN_NOISE_PATTERNS]
 
@@ -282,6 +388,15 @@ def _filter_noise_lines(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for ln in lines:
         t = ln["text"]
         is_noise = False
+        if RE_PURE_NUM_ONLY.match(t) and page_height and ln.get("bbox") is not None:
+            bb = ln["bbox"]
+            # 상단/하단 90pt 영역만 페이지번호로 간주 (값은 취향대로 조절)
+            if bb.y0 < 90 or bb.y1 > (page_height - 90):
+                is_noise = True
+            else:
+                # 본문(표 포함) 숫자는 살린다
+                is_noise = False
+
         # 한국어 노이즈 체크 — 단, "제N조"가 포함된 줄은 제외
         if _has_hangul(t) or not _has_latin(t):
             if not _extract_article_no_safe(t):  # 조문 번호가 있으면 노이즈 처리 안 함
@@ -630,7 +745,7 @@ class ComparativeConstitutionChunker:
                 lines = _page_lines_from_dict(page)
 
             lines = _strip_header_footer_lines(lines)
-            lines = _filter_noise_lines(lines)
+            lines = _filter_noise_lines(lines, page_height=page.rect.height)
 
             score = _page_quality_score(lines, country=country)
 
@@ -674,7 +789,7 @@ class ComparativeConstitutionChunker:
                 "page_ko": None,
                 "page_english": None,
                 "page_korean": None,
-                "bbox_lines": [],
+                "bbox_acc": {},
             }
 
         current: Dict[str, Any] = _empty_current()
@@ -710,7 +825,7 @@ class ComparativeConstitutionChunker:
                 text_type = "korean_only"
                 search_text = ko_text or ""
 
-            bbox_info = current["bbox_lines"][:5] if current["bbox_lines"] else []
+            bbox_info = _acc_to_boxes(current["bbox_acc"]) if current.get("bbox_acc") else []
             art_no = current.get("article_no")
 
             if art_no:
@@ -732,8 +847,25 @@ class ComparativeConstitutionChunker:
                     prefer_pages_1based=prefer_pages,
                     lang_hint=lang_hint,
                 )
+                merged_boxes = []
                 if anchored:
-                    bbox_info = anchored
+                    merged_boxes.extend(anchored)
+                if bbox_info:
+                    merged_boxes.extend(bbox_info)
+
+                # 너무 적으면(제목만 있거나 1줄만 있으면) 그대로 써도 되지만,
+                # UX 통일을 위해 union을 기본으로 적용
+                unioned = _union_bbox_info(
+                    merged_boxes,
+                    pad_x=3.0,   # 여백은 취향대로 조절
+                    pad_y=2.5,
+                )
+                if unioned:
+                    bbox_info = unioned
+                else:
+                    # union 실패 시 fallback: anchored 우선, 없으면 기존 bbox
+                    bbox_info = anchored or (bbox_info[:1] if bbox_info else [])
+
 
             chunks.append(
                 ConstitutionChunk(
@@ -777,7 +909,8 @@ class ComparativeConstitutionChunker:
                         current["display_path"] = _build_display_path(art, lang_hint)
                         current["structure"] = {"article_number": art}
                         current["page"] = page_no
-                        current["bbox_lines"].extend(_pack_bbox_info([ln], page_no, max_lines=1))
+                        if ln.get("bbox") is not None:
+                            _accum_bbox(current["bbox_acc"], page_no=page_no, bbox=ln["bbox"])
 
                         # v3.4: 조문 번호 줄에 본문이 붙어있는 경우 처리
                         # 예: "제32조①모든 국민은..." → art 뒤 본문 분리
@@ -843,8 +976,9 @@ class ComparativeConstitutionChunker:
                     if current["page"] is None:
                         current["page"] = page_no
 
-                    if len(current["bbox_lines"]) < 5:
-                        current["bbox_lines"].extend(_pack_bbox_info([ln], page_no, max_lines=1))
+                    if ln.get("bbox") is not None:
+                        _accum_bbox(current["bbox_acc"], page_no=page_no, bbox=ln["bbox"])
+
 
             else:
                 # 이중언어 문서 (기존 로직 유지)
@@ -901,7 +1035,7 @@ class ComparativeConstitutionChunker:
                     prev.search_text = (prev.search_text.rstrip() + "\n" + ch.korean_text).strip()
                     if ch.bbox_info:
                         prev.bbox_info = (prev.bbox_info or []) + ch.bbox_info
-                        prev.bbox_info = prev.bbox_info[:10]
+                        prev.bbox_info = _union_bbox_info(prev.bbox_info, pad_x=3.0, pad_y=2.5)
                     continue
 
                 if ch.english_text and prev.english_text:
@@ -909,13 +1043,13 @@ class ComparativeConstitutionChunker:
                     prev.search_text = (prev.search_text.rstrip() + "\n" + ch.english_text).strip()
                     if ch.bbox_info:
                         prev.bbox_info = (prev.bbox_info or []) + ch.bbox_info
-                        prev.bbox_info = prev.bbox_info[:10]
+                        prev.bbox_info = _union_bbox_info(prev.bbox_info, pad_x=3.0, pad_y=2.5)
                     continue
 
                 prev.search_text = (prev.search_text.rstrip() + "\n" + text).strip()
                 if ch.bbox_info:
                     prev.bbox_info = (prev.bbox_info or []) + ch.bbox_info
-                    prev.bbox_info = prev.bbox_info[:10]
+                    prev.bbox_info = _union_bbox_info(prev.bbox_info, pad_x=3.0, pad_y=2.5)
                 continue
 
             merged.append(ch)
