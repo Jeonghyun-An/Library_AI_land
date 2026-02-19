@@ -396,6 +396,18 @@ def _extract_article_no(line: str) -> Optional[str]:
 
     return None
 
+def _circled_to_int(s: str) -> int:
+    """원문자(①②③...⑳) → 정수, 숫자문자열 → 정수, 그 외 → 0"""
+    if not s:
+        return 0
+    s = str(s).strip()
+    circled = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+    if s in circled:
+        return circled.index(s) + 1
+    try:
+        return int(s)
+    except ValueError:
+        return 0
 
 def _build_display_path(article_no: Optional[str], lang_hint: str = "KO") -> str:
     if not article_no:
@@ -893,6 +905,110 @@ class ComparativeConstitutionChunker:
                 continue
 
             merged.append(ch)
+        article_groups: Dict[str, List[ConstitutionChunk]] = {}
+        for ch in merged:
+            art_no = (ch.structure or {}).get("article_number")
+            para = (ch.structure or {}).get("paragraph")
+            if art_no and para:
+                # 항 번호가 있는 청크 = 항 단위로 분리된 청크
+                key = f"{ch.doc_id}::{art_no}"
+                if key not in article_groups:
+                    article_groups[key] = []
+                article_groups[key].append(ch)
+
+        article_level_chunks: List[ConstitutionChunk] = []
+        for group_key, para_chunks in article_groups.items():
+            if len(para_chunks) < 2:
+                # 항이 1개뿐이면 통합 불필요 (이미 조 단위와 동일)
+                continue
+
+            # 항 번호 순으로 정렬
+            para_chunks.sort(key=lambda c: (
+                c.page or 0,
+                _circled_to_int((c.structure or {}).get("paragraph", "0"))
+            ))
+
+            first = para_chunks[0]
+            art_no = (first.structure or {}).get("article_number")
+
+            # 텍스트 합치기
+            all_ko_texts = []
+            all_en_texts = []
+            all_bbox_info = []
+            min_page = first.page or 1
+            page_en = first.page_english
+            page_ko = first.page_korean
+
+            for pc in para_chunks:
+                if pc.korean_text:
+                    all_ko_texts.append(pc.korean_text.strip())
+                if pc.english_text:
+                    all_en_texts.append(pc.english_text.strip())
+                if pc.bbox_info:
+                    all_bbox_info.extend(pc.bbox_info)
+                if pc.page and pc.page < min_page:
+                    min_page = pc.page
+                if pc.page_english and (page_en is None or pc.page_english < page_en):
+                    page_en = pc.page_english
+                if pc.page_korean and (page_ko is None or pc.page_korean < page_ko):
+                    page_ko = pc.page_korean
+
+            combined_ko = "\n".join(all_ko_texts).strip() if all_ko_texts else None
+            combined_en = "\n".join(all_en_texts).strip() if all_en_texts else None
+
+            has_en = bool(combined_en)
+            has_ko = bool(combined_ko)
+
+            if has_en and has_ko:
+                text_type = "bilingual"
+                search_text = (combined_en + "\n" + combined_ko).strip()
+            elif has_en:
+                text_type = "english_only"
+                search_text = combined_en or ""
+            else:
+                text_type = "korean_only"
+                search_text = combined_ko or ""
+
+            # 토큰 수 체크 (너무 긴 조는 스킵 — 임베딩 모델 한계)
+            if len(search_text) > 4000:
+                # 4000자 초과 시 조 단위 통합 스킵 (항별로만 유지)
+                continue
+
+            # display_path에서 /paragraph 부분 제거 → 조 레벨
+            lang_hint = "KO" if _has_hangul(search_text) else "EN"
+            article_display_path = _build_display_path(art_no, lang_hint)
+
+            seq += 1
+            article_level_chunks.append(
+                ConstitutionChunk(
+                    doc_id=first.doc_id,
+                    country=first.country,
+                    constitution_title=first.constitution_title,
+                    version=first.version,
+                    seq=seq,
+                    page=min_page,
+                    page_english=page_en,
+                    page_korean=page_ko,
+                    display_path=article_display_path,
+                    structure={
+                        "article_number": art_no,
+                        "chunk_type": "article_full",  # 조 단위 통합 청크 식별자
+                        "paragraph_count": len(para_chunks),
+                    },
+                    english_text=combined_en,
+                    korean_text=combined_ko,
+                    has_english=has_en,
+                    has_korean=has_ko,
+                    text_type=text_type,
+                    search_text=search_text,
+                    bbox_info=all_bbox_info[:10],  # 조 전체 bbox (최대 10개)
+                )
+            )
+
+        if article_level_chunks:
+            print(f"[Chunker] 조 단위 통합 청크 {len(article_level_chunks)}개 추가 "
+                  f"(기존 항별 {len(merged)}개 유지)")
+            merged.extend(article_level_chunks)
 
         return merged
 

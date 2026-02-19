@@ -138,6 +138,24 @@ docker volume create library_etcd_data
 docker-compose up -d
 ```
 
+### 데이터 초기화 (Windows PowerShell)
+
+# 1. 스택 중지
+
+docker compose down
+
+# 2. Milvus + etcd 볼륨 삭제 (항상 같이!)
+
+docker volume rm library_milvus_data library_etcd_data
+
+# 3. setup-volumes.ps1 실행 → 볼륨 재생성
+
+.\setup-volumes.ps1
+
+# 4. 스택 재시작
+
+docker compose up -d
+
 ## 사용 가이드
 
 ### 도서 업로드
