@@ -23,6 +23,7 @@ export const useConstitutionAPI = () => {
    *
    * @returns ComparativeSearchResponse
    */
+  // 여기서 환경변수 조절
   const comparativeSearch = async (params: {
     query: string;
     korean_top_k?: number;

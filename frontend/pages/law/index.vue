@@ -628,6 +628,13 @@
                         class="pdf_iframe"
                         frameborder="0"
                       ></iframe>
+                      <PdfHighlightOverlay
+                        v-if="koreanPdfUrl && koreanHighlightResults.length > 0"
+                        iframe-id="korean-pdf-viewer"
+                        :search-results="koreanHighlightResults"
+                        :active-result-index="selectedKoreanIndex"
+                        @highlight-click="onKoreanHighlightClick"
+                      />
                       <!-- <PDFHighlightViewer
                         v-if="koreanDocId"
                         :doc-id="koreanDocId"
@@ -702,6 +709,15 @@
                         class="pdf_iframe"
                         frameborder="0"
                       ></iframe>
+                      <PdfHighlightOverlay
+                        v-if="
+                          foreignPdfUrl && foreignHighlightResults.length > 0
+                        "
+                        iframe-id="foreign-pdf-viewer"
+                        :search-results="foreignHighlightResults"
+                        :active-result-index="null"
+                        @highlight-click="onForeignHighlightClick"
+                      />
                       <!-- <PDFHighlightViewer
                         v-if="foreignDocId"
                         :doc-id="foreignDocId"
@@ -1948,6 +1964,8 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   background: #2c2c2c;
   border-right: 2px solid #e5e7eb;
+  /* 오버레이 포지셔닝 기준점 */
+  position: relative;
 }
 
 .pdf_iframe {
