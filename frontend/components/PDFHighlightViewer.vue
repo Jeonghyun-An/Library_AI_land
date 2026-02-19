@@ -247,7 +247,9 @@ const resolvedApiBase = computed(() => {
   if (props.apiBase) return props.apiBase;
   try {
     const config = useRuntimeConfig();
-    return config.public.apiBase || "http://localhost:8000";
+    const base = config.public.apiBase || "http://localhost:8000";
+    // trailing slash 제거
+    return base.replace(/\/+$/, "");
   } catch {
     return "http://localhost:8000";
   }
@@ -258,9 +260,14 @@ const resolvedApiBase = computed(() => {
 /** 현재 페이지 이미지 URL */
 const currentPageImageUrl = computed(() => {
   if (!props.docId || currentPage.value < 1) return "";
-  return `${resolvedApiBase.value}/api/constitution/pdf/${props.docId}/page/${currentPage.value}?format=png&dpi=${props.dpi}`;
+  const base = resolvedApiBase.value;
+  const path = `/constitution/pdf/${props.docId}/page/${currentPage.value}?format=png&dpi=${props.dpi}`;
+  // base가 이미 /api 로 끝나면 중복 방지
+  if (base.endsWith("/api")) {
+    return `${base}${path}`;
+  }
+  return `${base}/api${path}`;
 });
-
 /** 이미지 컨테이너 스타일 */
 const imageContainerStyle = computed(() => {
   return {
@@ -297,7 +304,9 @@ function getLevel(score: number): string {
 async function loadPageDimensions() {
   if (!props.docId) return;
   try {
-    const url = `${resolvedApiBase.value}/api/constitution/pdf/${props.docId}/all-page-dimensions?dpi=${props.dpi}`;
+    const base = resolvedApiBase.value;
+    const path = `/constitution/pdf/${props.docId}/all-page-dimensions?dpi=${props.dpi}`;
+    const url = base.endsWith("/api") ? `${base}${path}` : `${base}/api${path}`;
     const response = await $fetch<any>(url, { method: "GET" });
 
     if (response?.pages) {
