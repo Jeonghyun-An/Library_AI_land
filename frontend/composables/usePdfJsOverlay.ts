@@ -4,33 +4,30 @@
  *
  * 핵심 원리:
  * 1. PDF.js viewer iframe 내부의 .page[data-page-number] 요소들의 위치/크기를 추적
- * 2. bbox_info의 PDF pt 좌표 → iframe 내 canvas/page 좌표로 변환
+ * 2. bbox_info의 PDF pt 좌표 → iframe 기준 절대 좌표로 변환
  * 3. iframe 위에 절대 위치 div로 하이라이트를 표시
- *
- * 같은 origin이어야 iframe.contentDocument 접근 가능 (localhost:90 → localhost:90)
  */
 
-import { ref, computed, onBeforeUnmount, type Ref } from "vue";
+import { ref, onBeforeUnmount } from "vue";
 
 // ==================== 타입 정의 ====================
 
 export interface PdfJsPageInfo {
   pageNumber: number;
-  /** page div의 iframe 내 위치 (viewerContainer 기준) */
-  offsetTop: number;
-  offsetLeft: number;
-  /** page div의 실제 렌더링 크기 (border/padding 제외) */
-  clientWidth: number;
-  clientHeight: number;
-  /** CSS scale factor (PDF.js 줌에 의해) */
-  scale: number;
-  /** PDF 원본 크기 (pt, 72DPI 기준) */
+  /**
+   * canvasWrapper의 iframe 뷰포트 기준 위치
+   * (getBoundingClientRect 사용 — 가장 정확)
+   */
+  canvasRect: DOMRect | null;
+  /** PDF 원본 크기 (pt, 72DPI 기준) — viewport.viewBox에서 추출 */
   viewportWidth: number;
   viewportHeight: number;
+  /** 현재 PDF.js 줌 스케일 */
+  scale: number;
 }
 
 export interface OverlayRect {
-  /** iframe wrapper 기준 CSS 좌표 */
+  /** 오버레이 루트(= pdf_viewer_area) 기준 CSS 좌표 */
   left: number;
   top: number;
   width: number;
@@ -47,29 +44,21 @@ export interface OverlayRect {
 // ==================== Composable ====================
 
 export const usePdfJsOverlay = () => {
-  // iframe 내부 상태 추적
+  // 상태
   const iframeReady = ref(false);
   const currentScale = ref(1.0);
   const visiblePages = ref<number[]>([]);
   const pageInfoCache = ref<Map<number, PdfJsPageInfo>>(new Map());
-
-  // 스크롤 오프셋 (viewerContainer)
-  const scrollTop = ref(0);
-  const scrollLeft = ref(0);
-  const viewerHeight = ref(0);
-  const viewerWidth = ref(0);
 
   // cleanup용
   let _scrollHandler: (() => void) | null = null;
   let _resizeObserver: ResizeObserver | null = null;
   let _pollInterval: ReturnType<typeof setInterval> | null = null;
   let _iframeRef: HTMLIFrameElement | null = null;
+  let _onUpdateCallback: (() => void) | null = null;
 
   /**
    * iframe이 로드된 후 PDF.js와 연결
-   *
-   * @param iframe - PDF.js viewer iframe 엘리먼트
-   * @param onUpdate - 스크롤/줌 변경 시 호출되는 콜백 (오버레이 갱신용)
    */
   const attachToIframe = (
     iframe: HTMLIFrameElement,
@@ -77,6 +66,7 @@ export const usePdfJsOverlay = () => {
   ): Promise<boolean> => {
     return new Promise((resolve) => {
       _iframeRef = iframe;
+      _onUpdateCallback = onUpdate || null;
 
       const tryAttach = () => {
         try {
@@ -87,66 +77,64 @@ export const usePdfJsOverlay = () => {
           const viewerContainer = iframeDoc.getElementById("viewerContainer");
           if (!viewerContainer) return false;
 
-          // PDF.js 앱 접근
           const pdfApp = (iframe.contentWindow as any)?.PDFViewerApplication;
           if (!pdfApp) return false;
 
+          // PDF 로드 여부 확인 - 페이지가 하나라도 렌더링되었는지
+          const pages = iframeDoc.querySelectorAll(".page[data-page-number]");
+          if (pages.length === 0) return false;
+
           iframeReady.value = true;
 
-          // 스크롤 이벤트 바인딩
+          // ────── 스크롤 이벤트 ──────
           _scrollHandler = () => {
-            scrollTop.value = viewerContainer.scrollTop;
-            scrollLeft.value = viewerContainer.scrollLeft;
-            viewerHeight.value = viewerContainer.clientHeight;
-            viewerWidth.value = viewerContainer.clientWidth;
-            updateVisiblePages(iframeDoc);
-            onUpdate?.();
+            refreshPageInfo();
+            _onUpdateCallback?.();
           };
           viewerContainer.addEventListener("scroll", _scrollHandler, {
             passive: true,
           });
 
-          // 초기값
-          scrollTop.value = viewerContainer.scrollTop;
-          scrollLeft.value = viewerContainer.scrollLeft;
-          viewerHeight.value = viewerContainer.clientHeight;
-          viewerWidth.value = viewerContainer.clientWidth;
-
-          // ResizeObserver로 줌 변경 감지
+          // ────── ResizeObserver (줌 변경 감지) ──────
           const viewer = iframeDoc.getElementById("viewer");
           if (viewer) {
             _resizeObserver = new ResizeObserver(() => {
-              refreshPageInfo(iframeDoc);
-              onUpdate?.();
+              refreshPageInfo();
+              _onUpdateCallback?.();
             });
             _resizeObserver.observe(viewer);
           }
 
-          // PDF.js 이벤트 리스닝 (pagechanging, scalechanging)
+          // ────── PDF.js 이벤트 ──────
           if (pdfApp.eventBus) {
-            pdfApp.eventBus.on("scalechanging", (e: any) => {
-              currentScale.value = e.scale || 1.0;
-              // 줌 후 약간의 딜레이 후 페이지 정보 갱신
+            pdfApp.eventBus.on("scalechanging", () => {
               setTimeout(() => {
-                refreshPageInfo(iframeDoc);
-                onUpdate?.();
-              }, 100);
+                refreshPageInfo();
+                _onUpdateCallback?.();
+              }, 150);
             });
 
             pdfApp.eventBus.on("pagechanging", () => {
-              updateVisiblePages(iframeDoc);
-              onUpdate?.();
+              refreshPageInfo();
+              _onUpdateCallback?.();
             });
 
             pdfApp.eventBus.on("pagesloaded", () => {
-              refreshPageInfo(iframeDoc);
-              onUpdate?.();
+              setTimeout(() => {
+                refreshPageInfo();
+                _onUpdateCallback?.();
+              }, 200);
+            });
+
+            // 페이지 렌더링 완료 (개별 페이지)
+            pdfApp.eventBus.on("pagerendered", () => {
+              refreshPageInfo();
+              _onUpdateCallback?.();
             });
           }
 
-          // 초기 페이지 정보 수집
-          refreshPageInfo(iframeDoc);
-          updateVisiblePages(iframeDoc);
+          // 초기 수집
+          refreshPageInfo();
 
           return true;
         } catch (err) {
@@ -155,15 +143,14 @@ export const usePdfJsOverlay = () => {
         }
       };
 
-      // iframe 로드 대기 (PDF.js 초기화는 시간이 걸림)
       if (tryAttach()) {
         resolve(true);
         return;
       }
 
-      // 폴링으로 재시도 (최대 10초)
+      // 폴링으로 재시도 (최대 15초)
       let retryCount = 0;
-      const maxRetries = 50; // 200ms * 50 = 10초
+      const maxRetries = 75;
       _pollInterval = setInterval(() => {
         retryCount++;
         if (tryAttach()) {
@@ -181,97 +168,129 @@ export const usePdfJsOverlay = () => {
   };
 
   /**
-   * 모든 페이지의 위치/크기 정보 갱신
+   * 모든 페이지의 실시간 위치/크기 정보 갱신
+   *
+   * 핵심: getBoundingClientRect()를 사용해서
+   *       iframe 뷰포트 기준의 정확한 위치를 가져옴.
+   *       toolbar, border, scroll 모두 자동 반영!
    */
-  const refreshPageInfo = (iframeDoc: Document) => {
-    const newCache = new Map<number, PdfJsPageInfo>();
-    const pages = iframeDoc.querySelectorAll(".page[data-page-number]");
-    const viewerContainer = iframeDoc.getElementById("viewerContainer");
+  const refreshPageInfo = () => {
+    if (!_iframeRef) return;
 
-    if (!viewerContainer) return;
+    try {
+      const iframeDoc = _iframeRef.contentDocument;
+      if (!iframeDoc) return;
 
-    pages.forEach((pageEl) => {
-      const pageNum = parseInt(pageEl.getAttribute("data-page-number") || "0");
-      if (pageNum <= 0) return;
+      const pages = iframeDoc.querySelectorAll(".page[data-page-number]");
+      const newCache = new Map<number, PdfJsPageInfo>();
 
-      const el = pageEl as HTMLElement;
+      const pdfApp = (_iframeRef.contentWindow as any)?.PDFViewerApplication;
 
-      // PDF.js는 page div 안에 canvas를 렌더링
-      // page div의 크기 = canvas 크기 + border/padding
-      const canvasWrapper = el.querySelector(".canvasWrapper") as HTMLElement;
-      const targetEl = canvasWrapper || el;
+      pages.forEach((pageEl) => {
+        const pageNum = parseInt(
+          pageEl.getAttribute("data-page-number") || "0",
+        );
+        if (pageNum <= 0) return;
 
-      // PDF.js의 viewport 정보 (원본 PDF 크기)
-      let viewportWidth = 595; // A4 기본값 (pt)
-      let viewportHeight = 842;
-      let scale = 1.0;
+        // canvasWrapper가 실제 렌더링 영역 (page div의 border 내부)
+        const canvasWrapper = pageEl.querySelector(
+          ".canvasWrapper",
+        ) as HTMLElement;
+        const targetEl = canvasWrapper || (pageEl as HTMLElement);
 
-      try {
-        const pdfApp = (_iframeRef?.contentWindow as any)?.PDFViewerApplication;
-        if (pdfApp?.pdfViewer?._pages?.[pageNum - 1]) {
-          const pdfPage = pdfApp.pdfViewer._pages[pageNum - 1];
-          if (pdfPage.viewport) {
-            // viewport는 이미 스케일 적용된 값
-            viewportWidth =
-              pdfPage.viewport.viewBox?.[2] ||
-              pdfPage.viewport.width / pdfPage.viewport.scale;
-            viewportHeight =
-              pdfPage.viewport.viewBox?.[3] ||
-              pdfPage.viewport.height / pdfPage.viewport.scale;
-            scale = pdfPage.viewport.scale || 1.0;
+        // getBoundingClientRect는 iframe 뷰포트 기준 좌표를 반환
+        // → toolbar, border, margin, scroll 모두 자동 반영됨!
+        const canvasRect = targetEl.getBoundingClientRect();
+
+        // PDF 원본 크기 (pt, 72DPI)
+        let viewportWidth = 595; // A4 기본값
+        let viewportHeight = 842;
+        let scale = 1.0;
+
+        try {
+          if (pdfApp?.pdfViewer?._pages?.[pageNum - 1]) {
+            const pdfPageView = pdfApp.pdfViewer._pages[pageNum - 1];
+            if (pdfPageView.viewport) {
+              const vp = pdfPageView.viewport;
+              // viewBox는 [x, y, width, height] 형태의 원본 PDF 크기
+              if (vp.viewBox && vp.viewBox.length >= 4) {
+                viewportWidth = vp.viewBox[2] - vp.viewBox[0];
+                viewportHeight = vp.viewBox[3] - vp.viewBox[1];
+              } else {
+                // fallback: scale로 역산
+                viewportWidth = vp.width / vp.scale;
+                viewportHeight = vp.height / vp.scale;
+              }
+              scale = vp.scale || 1.0;
+            }
           }
+        } catch {
+          // fallback 사용
         }
-      } catch {
-        // fallback 사용
-      }
 
-      currentScale.value = scale;
+        currentScale.value = scale;
 
-      newCache.set(pageNum, {
-        pageNumber: pageNum,
-        offsetTop: el.offsetTop,
-        offsetLeft: el.offsetLeft,
-        clientWidth: targetEl.clientWidth,
-        clientHeight: targetEl.clientHeight,
-        scale,
-        viewportWidth,
-        viewportHeight,
+        newCache.set(pageNum, {
+          pageNumber: pageNum,
+          canvasRect,
+          viewportWidth,
+          viewportHeight,
+          scale,
+        });
       });
-    });
 
-    pageInfoCache.value = newCache;
+      pageInfoCache.value = newCache;
+
+      // 보이는 페이지 갱신
+      _updateVisiblePages();
+    } catch (err) {
+      // iframe이 해제된 경우 등
+    }
   };
 
   /**
    * 현재 보이는 페이지 번호 목록 갱신
+   * (iframe 뷰포트 내에 보이는 페이지)
    */
-  const updateVisiblePages = (iframeDoc: Document) => {
-    const viewerContainer = iframeDoc.getElementById("viewerContainer");
-    if (!viewerContainer) return;
+  const _updateVisiblePages = () => {
+    if (!_iframeRef) return;
 
-    const containerTop = viewerContainer.scrollTop;
-    const containerBottom = containerTop + viewerContainer.clientHeight;
+    try {
+      const iframeDoc = _iframeRef.contentDocument;
+      if (!iframeDoc) return;
 
-    const visible: number[] = [];
-    pageInfoCache.value.forEach((info, pageNum) => {
-      const pageTop = info.offsetTop;
-      const pageBottom = pageTop + info.clientHeight;
+      const viewerContainer = iframeDoc.getElementById("viewerContainer");
+      if (!viewerContainer) return;
 
-      // 페이지가 뷰포트와 겹치는지 확인
-      if (pageBottom > containerTop && pageTop < containerBottom) {
-        visible.push(pageNum);
-      }
-    });
+      const containerRect = viewerContainer.getBoundingClientRect();
 
-    visiblePages.value = visible.sort((a, b) => a - b);
+      const visible: number[] = [];
+      pageInfoCache.value.forEach((info, pageNum) => {
+        if (!info.canvasRect) return;
+        const cr = info.canvasRect;
+        // 페이지가 viewerContainer 뷰포트와 겹치는지
+        if (cr.bottom > containerRect.top && cr.top < containerRect.bottom) {
+          visible.push(pageNum);
+        }
+      });
+
+      visiblePages.value = visible.sort((a, b) => a - b);
+    } catch {
+      // ignore
+    }
   };
 
   /**
-   * bbox (PDF pt 좌표) → 오버레이 rect (iframe wrapper 기준 px 좌표) 변환
+   * bbox (PDF pt 좌표) → 오버레이 rect (iframe 뷰포트 기준 px 좌표) 변환
    *
-   * @param bbox - { page, x0, y0, x1, y1 } (72 DPI pt 좌표)
-   * @param meta - 추가 메타데이터 (score, text 등)
-   * @returns OverlayRect | null
+   * 좌표 변환 과정:
+   *   1. canvasRect = canvasWrapper의 iframe 뷰포트 기준 getBoundingClientRect
+   *   2. scaleX = canvasRect.width / viewportWidth(pt)
+   *   3. localX = bbox.x0 * scaleX   (canvasWrapper 내 로컬 좌표)
+   *   4. 최종 left = canvasRect.left + localX
+   *
+   * canvasRect.left/top은 getBoundingClientRect에서 오므로
+   * 스크롤, toolbar 높이, border, margin 등이 모두 자동 반영!
    */
   const bboxToOverlayRect = (
     bbox: {
@@ -290,22 +309,24 @@ export const usePdfJsOverlay = () => {
     },
   ): OverlayRect | null => {
     const pageInfo = pageInfoCache.value.get(bbox.page);
-    if (!pageInfo) return null;
+    if (!pageInfo || !pageInfo.canvasRect) return null;
 
-    // PDF pt → 페이지 div 내 px 좌표
-    // scaleX = page실제렌더링너비 / PDF원본너비(pt)
-    const scaleX = pageInfo.clientWidth / pageInfo.viewportWidth;
-    const scaleY = pageInfo.clientHeight / pageInfo.viewportHeight;
+    const cr = pageInfo.canvasRect;
 
+    // PDF pt → canvas px 스케일
+    const scaleX = cr.width / pageInfo.viewportWidth;
+    const scaleY = cr.height / pageInfo.viewportHeight;
+
+    // bbox의 canvas 내 로컬 좌표
     const localLeft = bbox.x0 * scaleX;
     const localTop = bbox.y0 * scaleY;
     const localWidth = (bbox.x1 - bbox.x0) * scaleX;
     const localHeight = (bbox.y1 - bbox.y0) * scaleY;
 
-    // 페이지 div의 offsetTop/Left → viewerContainer 기준 절대좌표
-    // 그 다음 scrollTop/Left 빼서 → 현재 보이는 viewport 기준 좌표
-    const absLeft = pageInfo.offsetLeft + localLeft - scrollLeft.value;
-    const absTop = pageInfo.offsetTop + localTop - scrollTop.value;
+    // iframe 뷰포트 기준 최종 좌표
+    // cr.left/top은 getBoundingClientRect → 스크롤/toolbar/border 모두 반영됨
+    const absLeft = cr.left + localLeft;
+    const absTop = cr.top + localTop;
 
     // 레벨 결정
     let level: "high" | "medium" | "low";
@@ -368,12 +389,12 @@ export const usePdfJsOverlay = () => {
     }
 
     _iframeRef = null;
+    _onUpdateCallback = null;
     iframeReady.value = false;
     pageInfoCache.value.clear();
     visiblePages.value = [];
   };
 
-  // 컴포넌트 언마운트 시 정리
   onBeforeUnmount(() => {
     detach();
   });
@@ -384,10 +405,6 @@ export const usePdfJsOverlay = () => {
     currentScale,
     visiblePages,
     pageInfoCache,
-    scrollTop,
-    scrollLeft,
-    viewerHeight,
-    viewerWidth,
 
     // 메서드
     attachToIframe,

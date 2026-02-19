@@ -1,10 +1,11 @@
 <!-- frontend/components/PdfHighlightOverlay.vue -->
 <!--
   PDF.js iframe 위에 bbox 하이라이트를 표시하는 오버레이 컴포넌트
-   - PDF.js의 페이지 위치/크기 정보를 활용하여 bbox 좌표를 오버레이 좌표로 변환
-   - 스크롤/줌 시 자동으로 하이라이트 위치 갱신
-   - 검색 결과의 유사도에 따라 색상/투명도 조절
-   - 클릭 시 해당 검색 결과 정보 emit
+
+    1. pdf_viewer_area에 position:relative가 있고, 이 컴포넌트는 그 안에 position:absolute
+    2. iframe 내부 PDF.js의 canvasWrapper 위치를 getBoundingClientRect로 추적
+    3. iframe 자체의 getBoundingClientRect를 빼서 → pdf_viewer_area 기준 좌표로 변환
+    4. 스크롤/줌 시 자동으로 좌표 재계산
 -->
 <template>
   <div class="pdf_overlay_root" ref="overlayRoot">
@@ -12,7 +13,6 @@
     <div
       v-if="iframeReady && overlayRects.length > 0"
       class="pdf_overlay_layer"
-      ref="overlayLayer"
     >
       <div
         v-for="(rect, idx) in overlayRects"
@@ -49,7 +49,7 @@
       </div>
     </div>
 
-    <!-- 연결 상태 표시 (디버그용, 운영 시 숨김 가능) -->
+    <!-- 연결 상태 표시 -->
     <div v-if="!iframeReady && hasResults" class="pdf_overlay_status">
       <div class="pdf_overlay_status_dot"></div>
       PDF 연결 중...
@@ -94,24 +94,23 @@ const emit = defineEmits<{
 // ==================== Composable ====================
 const {
   iframeReady,
-  currentScale,
   visiblePages,
-  pageInfoCache,
-  scrollTop,
-  scrollLeft,
   attachToIframe,
   bboxToOverlayRect,
-  scrollToPage,
   detach,
+  refreshPageInfo,
 } = usePdfJsOverlay();
 
 // ==================== Refs ====================
 const overlayRoot = ref<HTMLDivElement | null>(null);
-const overlayLayer = ref<HTMLDivElement | null>(null);
 const hoveredIdx = ref<number | null>(null);
 
 // 오버레이 갱신 트리거 (스크롤/줌 시마다 증가)
 const updateTrigger = ref(0);
+
+// iframe의 뷰포트 기준 오프셋 (좌표 보정용)
+const iframeOffsetX = ref(0);
+const iframeOffsetY = ref(0);
 
 // ==================== Computed ====================
 
@@ -144,7 +143,6 @@ const highlightData = computed(() => {
     const bboxInfoRaw = result.bbox_info || [];
     if (bboxInfoRaw.length === 0) return;
 
-    // bbox 유효성 검사
     const validBboxes = bboxInfoRaw.filter(
       (b: any) =>
         b &&
@@ -182,13 +180,14 @@ const highlightData = computed(() => {
 
 /**
  * 현재 보이는 페이지에 해당하는 오버레이 사각형 목록
- * scrollTop/scrollLeft/updateTrigger가 바뀔 때마다 재계산
+ *
+ * 좌표 흐름:
+ *   bboxToOverlayRect → iframe 뷰포트 기준 좌표
+ *   - iframeOffsetX/Y 보정 → overlayRoot(pdf_viewer_area) 기준 좌표
  */
 const overlayRects = computed<OverlayRect[]>(() => {
   // 의존성 트리거
-  const _ = updateTrigger.value;
-  const _st = scrollTop.value;
-  const _sl = scrollLeft.value;
+  const _trigger = updateTrigger.value;
 
   if (!iframeReady.value || highlightData.value.length === 0) return [];
 
@@ -203,6 +202,9 @@ const overlayRects = computed<OverlayRect[]>(() => {
     renderPages.add(p + 1);
   }
 
+  const rootHeight = overlayRoot.value?.clientHeight || 800;
+  const rootWidth = overlayRoot.value?.clientWidth || 600;
+
   for (const hlData of highlightData.value) {
     for (const bbox of hlData.bboxList) {
       if (!renderPages.has(bbox.page)) continue;
@@ -216,10 +218,18 @@ const overlayRects = computed<OverlayRect[]>(() => {
 
       if (!rect) continue;
 
-      // 뷰포트 밖은 스킵 (여유 100px)
+      // ★ 핵심 보정: iframe 뷰포트 좌표 → overlayRoot 기준 좌표
+      // bboxToOverlayRect가 반환하는 좌표는 iframe 내부의 getBoundingClientRect 기준
+      // 이를 overlayRoot(= pdf_viewer_area) 기준으로 변환
+      rect.left = rect.left + iframeOffsetX.value;
+      rect.top = rect.top + iframeOffsetY.value;
+
+      // 뷰포트 밖은 스킵 (여유 50px)
       if (
-        rect.top + rect.height < -100 ||
-        rect.top > (overlayRoot.value?.clientHeight || 800) + 100
+        rect.top + rect.height < -50 ||
+        rect.top > rootHeight + 50 ||
+        rect.left + rect.width < -50 ||
+        rect.left > rootWidth + 50
       ) {
         continue;
       }
@@ -250,10 +260,15 @@ async function connectToIframe() {
     return;
   }
 
-  // iframe 로드 완료 대기
+  // iframe의 overlayRoot 기준 오프셋 계산
+  updateIframeOffset(iframe);
+
   const onLoad = async () => {
     // PDF.js 초기화 시간 대기
     await new Promise((r) => setTimeout(r, 500));
+
+    // iframe 오프셋 재계산
+    updateIframeOffset(iframe);
 
     const success = await attachToIframe(iframe, () => {
       // 스크롤/줌 변경 콜백 → 오버레이 갱신
@@ -265,14 +280,37 @@ async function connectToIframe() {
     }
   };
 
-  // iframe이 이미 로드되었는지 확인
   if (iframe.contentDocument?.readyState === "complete") {
     await onLoad();
   } else {
     iframe.addEventListener("load", onLoad, { once: true });
     // 이미 로드 시작된 경우 대비
-    setTimeout(onLoad, 1000);
+    setTimeout(onLoad, 1500);
   }
+}
+
+/**
+ * iframe의 overlayRoot 기준 오프셋 계산
+ *
+ * iframe 내부의 getBoundingClientRect는 iframe 뷰포트 기준이므로,
+ * 오버레이 div의 기준점(pdf_viewer_area)과의 차이를 계산
+ *
+ * iframe.getBoundingClientRect → 외부 문서 기준 iframe 위치
+ * overlayRoot.getBoundingClientRect → 외부 문서 기준 오버레이 위치
+ * → 둘의 차이 = iframe 내부 좌표를 overlayRoot 좌표로 변환할 때 더해야 할 값
+ */
+function updateIframeOffset(iframe?: HTMLIFrameElement | null) {
+  const iframeEl =
+    iframe ||
+    (document.getElementById(props.iframeId) as HTMLIFrameElement | null);
+  if (!iframeEl || !overlayRoot.value) return;
+
+  const iframeRect = iframeEl.getBoundingClientRect();
+  const rootRect = overlayRoot.value.getBoundingClientRect();
+
+  // iframe이 overlayRoot의 (0,0) 기준으로 어디에 있는지
+  iframeOffsetX.value = iframeRect.left - rootRect.left;
+  iframeOffsetY.value = iframeRect.top - rootRect.top;
 }
 
 /**
@@ -300,7 +338,18 @@ watch(
 // searchResults 변경 → 오버레이 갱신
 watch(
   () => props.searchResults,
-  () => {
+  async () => {
+    // 검색 결과 변경 시 iframe 재연결 시도 (새 PDF 로드 가능성)
+    await nextTick();
+
+    // iframe offset 재계산
+    updateIframeOffset();
+
+    // 이미 연결된 상태면 페이지 정보만 갱신
+    if (iframeReady.value) {
+      refreshPageInfo();
+    }
+
     updateTrigger.value++;
   },
   { deep: true },
@@ -308,14 +357,43 @@ watch(
 
 // ==================== 생명주기 ====================
 
+// iframe src 변경 감지를 위한 MutationObserver
+let _srcObserver: MutationObserver | null = null;
+
 onMounted(async () => {
-  // DOM 렌더링 후 약간 대기
   await nextTick();
   await connectToIframe();
+
+  // iframe의 src 변경을 감지해서 재연결
+  const iframe = document.getElementById(props.iframeId);
+  if (iframe) {
+    _srcObserver = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type === "attributes" && m.attributeName === "src") {
+          // src 변경됨 → 재연결
+          detach();
+          setTimeout(() => connectToIframe(), 1000);
+          break;
+        }
+      }
+    });
+    _srcObserver.observe(iframe, {
+      attributes: true,
+      attributeFilter: ["src"],
+    });
+  }
+
+  // 윈도우 리사이즈 시 오프셋 재계산
+  window.addEventListener("resize", () => updateIframeOffset());
 });
 
 onBeforeUnmount(() => {
   detach();
+  if (_srcObserver) {
+    _srcObserver.disconnect();
+    _srcObserver = null;
+  }
+  window.removeEventListener("resize", () => updateIframeOffset());
 });
 </script>
 
@@ -353,7 +431,6 @@ onBeforeUnmount(() => {
   transition:
     opacity 0.15s ease,
     box-shadow 0.15s ease;
-  /* 기본 스타일 */
   border: 2px solid transparent;
   box-sizing: border-box;
 }
