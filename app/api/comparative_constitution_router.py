@@ -129,6 +129,7 @@ class ConstitutionArticleResult(BaseModel):
 
     # 하이라이트용 bbox
     bbox_info: List[Dict[str, Any]] = Field(default_factory=list)
+    paragraph_bbox_info: Dict[str, List[Dict[str, Any]]] = {}
     continent: str = Field(default="asia", description="대륙 정보")
     version: Optional[str] = Field(None, description="버전/개정일")
     is_bilingual: bool = Field(False, description="이중언어 여부")
@@ -923,11 +924,21 @@ async def _index_constitution_background(
             meta["indexed_at"] = now_iso
             meta["updated_at"] = now_iso
 
-            # bbox_info 안전장치: list 보장 + 최대 5개
-            if isinstance(meta.get("bbox_info"), list):
-                meta["bbox_info"] = meta["bbox_info"][:5]
+            # bbox_info: 항 bbox (항 강조용)
+            if isinstance(meta.get("bbox_info"), list) and meta["bbox_info"]:
+                meta["bbox_info"] = meta["bbox_info"][:10]
             else:
                 meta["bbox_info"] = []
+
+            # article_bbox_info: 조 전체 bbox (조 배경용) — v3.8 신규
+            if isinstance(meta.get("article_bbox_info"), list) and meta["article_bbox_info"]:
+                meta["article_bbox_info"] = meta["article_bbox_info"][:20]
+            else:
+                meta["article_bbox_info"] = meta.get("bbox_info", [])
+                # fallback: article_bbox_info 없으면 bbox_info로 대체
+
+            # paragraph_bbox_info 제거 (v3.8에서 사용 안 함)
+            meta.pop("paragraph_bbox_info", None)
 
             # structure 안전장치: dict 보장
             if not isinstance(meta.get("structure"), dict):
@@ -1522,6 +1533,7 @@ async def _search_foreign_candidate_pool(
                 page_english=meta.get("page_english"),
                 page_korean=meta.get("page_korean"),
                 bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else [],
+                paragraph_bbox_info=meta.get("paragraph_bbox_info", {}) if isinstance(meta.get("paragraph_bbox_info"), dict) else {},
                 continent=get_continent(meta.get("country", ""))
             )
         )
@@ -1611,6 +1623,7 @@ def _build_pairs_optimized(
                 page_english=meta.get("page_english"),
                 page_korean=meta.get("page_korean"),
                 bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else [],
+                paragraph_bbox_info=meta.get("paragraph_bbox_info", {}) if isinstance(meta.get("paragraph_bbox_info"), dict) else {},
                 continent=get_continent(meta.get("country", ""))
             )
             foreign_articles.append(article)
@@ -1820,6 +1833,7 @@ async def comparative_search(request: ComparativeSearchRequest):
                 page_english=meta.get("page_english"),
                 page_korean=meta.get("page_korean"),
                 bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else [],
+                paragraph_bbox_info=meta.get("paragraph_bbox_info", {}) if isinstance(meta.get("paragraph_bbox_info"), dict) else {},
                 continent=get_continent(meta.get("country", ""))
             )
             foreign_articles.append(article)
