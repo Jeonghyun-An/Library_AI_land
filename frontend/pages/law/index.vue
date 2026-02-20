@@ -631,6 +631,7 @@
                       <PdfHighlightOverlay
                         v-if="koreanPdfUrl && koreanHighlightResults.length > 0"
                         iframe-id="korean-pdf-viewer"
+                        :pdf-url="koreanPdfUrl"
                         :search-results="koreanHighlightResults"
                         :active-result-index="selectedKoreanIndex"
                         @highlight-click="onKoreanHighlightClick"
@@ -714,6 +715,7 @@
                           foreignPdfUrl && foreignHighlightResults.length > 0
                         "
                         iframe-id="foreign-pdf-viewer"
+                        :pdf-url="foreignPdfUrl"
                         :search-results="foreignHighlightResults"
                         :active-result-index="null"
                         @highlight-click="onForeignHighlightClick"

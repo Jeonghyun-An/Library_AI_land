@@ -1,6 +1,6 @@
 <!-- frontend/components/PdfHighlightOverlay.vue -->
 <!--
-  PDF.js iframe 위에 bbox 하이라이트를 표시하는 오버레이 컴포넌트 (v3.8)
+  PDF.js iframe 위에 bbox 하이라이트를 표시하는 오버레이 컴포넌트 (v3.9)
 
   2중 레이어:
     Layer 1 (article): article_bbox_info → 조 전체 영역, 연한 노란 배경
@@ -8,6 +8,11 @@
 
   항 없는 단문 조의 경우 bbox_info == article_bbox_info이므로
   두 레이어가 겹쳐 단일 강조처럼 보임.
+
+  v3.9 변경사항:
+    - pdfUrl prop 추가: URL 변경 시 detach → reconnect 자동 수행
+      → 국가 전환 후 외국 헌법 하이라이트가 표시되지 않던 문제 해결
+    - iframeId가 고정("foreign-pdf-viewer")이어도 PDF가 바뀌면 재연결
 -->
 <template>
   <div class="pdf_overlay_root" ref="overlayRoot">
@@ -101,10 +106,17 @@ interface Props {
   iframeId: string;
   searchResults?: any[];
   activeResultIndex?: number | null;
+  /**
+   * ★ v3.9 신규: iframe에 로드된 PDF URL
+   * 국가 전환 등으로 URL이 바뀔 때 overlay를 자동으로 재연결합니다.
+   * iframeId는 고정이어도 PDF URL이 바뀌면 새 PDF.js 인스턴스와 재연결됩니다.
+   */
+  pdfUrl?: string | null;
 }
 const props = withDefaults(defineProps<Props>(), {
   searchResults: () => [],
   activeResultIndex: null,
+  pdfUrl: null,
 });
 
 // ==================== Emits ====================
@@ -320,6 +332,31 @@ watch(
       await nextTick();
       await connectToIframe();
     }
+  },
+);
+
+/**
+ * ★ v3.9 핵심 수정:
+ * pdfUrl이 바뀌면 (= 국가 전환, 문서 전환 등) iframe의 src가 바뀌면서
+ * PDF.js가 재초기화됨. 이때 기존 연결을 detach하고 새로 connectToIframe해야
+ * 하이라이트 overlay가 새 PDF.js 인스턴스와 올바르게 연결됨.
+ *
+ * 문제 재현 경로:
+ *   국가A 선택 → foreignPdfUrl 변경 → iframe.src 변경 → PDF.js 재시작
+ *   → overlay는 iframeReady=true인 채로 구 인스턴스 참조 → 하이라이트 안 보임
+ */
+watch(
+  () => props.pdfUrl,
+  async (newUrl, oldUrl) => {
+    if (!newUrl || newUrl === oldUrl) return;
+    console.log(
+      `[PdfHighlightOverlay] pdfUrl 변경 감지 → 재연결: ${oldUrl} → ${newUrl}`,
+    );
+    detach();
+    await nextTick();
+    // iframe src가 실제로 변경될 때까지 약간 대기 후 재연결
+    await new Promise((r) => setTimeout(r, 100));
+    await connectToIframe();
   },
 );
 
