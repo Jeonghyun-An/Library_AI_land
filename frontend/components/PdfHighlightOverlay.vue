@@ -1,18 +1,16 @@
 <!-- frontend/components/PdfHighlightOverlay.vue -->
 <!--
-  PDF.js iframe 위에 bbox 하이라이트를 표시하는 오버레이 컴포넌트 (v3.9)
+  PDF.js iframe 위에 bbox 하이라이트를 표시하는 오버레이 컴포넌트 (v3.10)
 
   2중 레이어:
     Layer 1 (article): article_bbox_info → 조 전체 영역, 연한 노란 배경
     Layer 2 (para):    bbox_info         → 해당 항 영역, 진한 주황 강조
 
-  항 없는 단문 조의 경우 bbox_info == article_bbox_info이므로
-  두 레이어가 겹쳐 단일 강조처럼 보임.
-
-  v3.9 변경사항:
-    - pdfUrl prop 추가: URL 변경 시 detach → reconnect 자동 수행
-      → 국가 전환 후 외국 헌법 하이라이트가 표시되지 않던 문제 해결
-    - iframeId가 고정("foreign-pdf-viewer")이어도 PDF가 바뀌면 재연결
+  v3.10 변경사항:
+    - displayScore prop 제거 (잘못된 Float16Array 타입, idx 오탐 버그)
+    - searchResults 각 항목의 display_score(min-max 정규화, 0~1)를 직접 파싱
+    - rect.displayScore 필드로 툴팁에 표시
+    - display_score 없을 경우 score fallback
 -->
 <template>
   <div class="pdf_overlay_root" ref="overlayRoot">
@@ -40,7 +38,7 @@
         @click.stop="onRectClick(rect)"
       />
 
-      <!-- Layer 2: 항 강조 (진한 주황) -->
+      <!-- Layer 2: 항 강조 (진한 주황) + 툴팁 -->
       <div
         v-for="(rect, idx) in paragraphRects"
         :key="`para-${rect.resultIndex}-${rect.pageNumber}-${idx}`"
@@ -68,9 +66,14 @@
             >항</span
           >
           <span v-else class="pdf_overlay_tooltip_tag article">단문 조</span>
-          <span class="pdf_overlay_tooltip_score"
-            >{{ Math.round(rect.score * 100) }}%</span
-          >
+          <!--
+            ★ v3.10: display_score(정규화 0~1) → % 변환 표시
+            index.vue의 comparativeSearch 결과에서 hybrid_search_service가
+            min-max 정규화한 값. 없으면 raw score fallback.
+          -->
+          <span class="pdf_overlay_tooltip_score">
+            {{ Math.round((rect.displayScore ?? rect.score ?? 0) * 100) }}%
+          </span>
           <p v-if="rect.text">
             {{ rect.text.substring(0, 120)
             }}{{ rect.text.length > 120 ? "..." : "" }}
@@ -107,9 +110,8 @@ interface Props {
   searchResults?: any[];
   activeResultIndex?: number | null;
   /**
-   * ★ v3.9 신규: iframe에 로드된 PDF URL
+   * v3.9: iframe에 로드된 PDF URL
    * 국가 전환 등으로 URL이 바뀔 때 overlay를 자동으로 재연결합니다.
-   * iframeId는 고정이어도 PDF URL이 바뀌면 새 PDF.js 인스턴스와 재연결됩니다.
    */
   pdfUrl?: string | null;
 }
@@ -155,7 +157,15 @@ const renderPages = computed<Set<number>>(() => {
   return s;
 });
 
-/** 검색 결과 파싱 */
+/**
+ * 검색 결과 파싱
+ *
+ * ★ v3.10: display_score 파싱 추가
+ *   - index.vue의 comparativeSearch 응답 각 결과에 display_score(0~1) 존재
+ *   - hybrid_search_service.py에서 min-max 정규화된 상대 점수
+ *   - score(raw reranker score)와 별개로 display_score를 툴팁에 표시
+ *   - null이면 rect.score fallback
+ */
 const highlightData = computed(() => {
   if (!props.searchResults?.length) return [];
   return props.searchResults
@@ -166,11 +176,9 @@ const highlightData = computed(() => {
       const paraBoxes = (result.bbox_info || []).filter(isValid);
       const articleBoxes = (result.article_bbox_info || []).filter(isValid);
 
-      // article_bbox_info 없으면 bbox_info로 fallback (단문 조 또는 구버전 데이터)
       const effectiveArticleBoxes =
         articleBoxes.length > 0 ? articleBoxes : paraBoxes;
 
-      // 항 있는지 여부 (structure.paragraph 또는 두 bbox가 다른 경우)
       const isParagraphLevel = Boolean(result.structure?.paragraph);
 
       const displayText =
@@ -182,11 +190,17 @@ const highlightData = computed(() => {
           : "") ||
         "";
 
+      // ★ display_score: index.vue → searchResults로 전달되는 정규화 점수(0~1)
+      const displayScore: number | null =
+        typeof result.display_score === "number" ? result.display_score : null;
+      const score: number = typeof result.score === "number" ? result.score : 0;
+
       return {
         paraBoxes,
         articleBoxes: effectiveArticleBoxes,
         isParagraphLevel,
-        score: result.score || result.display_score || 0,
+        score,
+        displayScore,
         displayText: displayText.substring(0, 200),
         articleLabel,
         resultIndex: index,
@@ -195,19 +209,25 @@ const highlightData = computed(() => {
     .filter((d) => d.paraBoxes.length > 0 || d.articleBoxes.length > 0);
 });
 
-/** 공통 rect 변환 */
+/** 공통 rect 변환 — displayScore를 rect에 포함 */
 function toRect(
   bbox: any,
   meta: {
     score: number;
+    displayScore: number | null;
     text: string;
     articleLabel: string;
     resultIndex: number;
   },
   extra?: Record<string, any>,
 ): (OverlayRect & Record<string, any>) | null {
-  const _t = updateTrigger.value; // 의존성 트리거
-  const rect = bboxToOverlayRect(bbox, meta);
+  const _t = updateTrigger.value;
+  const rect = bboxToOverlayRect(bbox, {
+    score: meta.score,
+    text: meta.text,
+    articleLabel: meta.articleLabel,
+    resultIndex: meta.resultIndex,
+  });
   if (!rect) return null;
   rect.left += iframeOffsetX.value;
   rect.top += iframeOffsetY.value;
@@ -222,7 +242,8 @@ function toRect(
     rect.height < 3
   )
     return null;
-  return { ...rect, ...extra };
+  // ★ displayScore를 rect에 포함 → 템플릿에서 rect.displayScore로 접근
+  return { ...rect, displayScore: meta.displayScore, ...extra };
 }
 
 /** Layer 1: 조 전체 배경 */
@@ -235,6 +256,7 @@ const articleRects = computed(() => {
       if (!renderPages.value.has(bbox.page)) continue;
       const r = toRect(bbox, {
         score: d.score,
+        displayScore: d.displayScore,
         text: d.displayText,
         articleLabel: d.articleLabel,
         resultIndex: d.resultIndex,
@@ -257,6 +279,7 @@ const paragraphRects = computed(() => {
         bbox,
         {
           score: d.score,
+          displayScore: d.displayScore,
           text: d.displayText,
           articleLabel: d.articleLabel,
           resultIndex: d.resultIndex,
@@ -336,14 +359,9 @@ watch(
 );
 
 /**
- * ★ v3.9 핵심 수정:
- * pdfUrl이 바뀌면 (= 국가 전환, 문서 전환 등) iframe의 src가 바뀌면서
- * PDF.js가 재초기화됨. 이때 기존 연결을 detach하고 새로 connectToIframe해야
- * 하이라이트 overlay가 새 PDF.js 인스턴스와 올바르게 연결됨.
- *
- * 문제 재현 경로:
- *   국가A 선택 → foreignPdfUrl 변경 → iframe.src 변경 → PDF.js 재시작
- *   → overlay는 iframeReady=true인 채로 구 인스턴스 참조 → 하이라이트 안 보임
+ * v3.9: pdfUrl 변경 시 자동 재연결
+ * 국가 전환 → foreignPdfUrl 변경 → iframe.src 변경 → PDF.js 재시작
+ * → overlay 재연결 없으면 하이라이트 안 보임
  */
 watch(
   () => props.pdfUrl,
@@ -354,7 +372,6 @@ watch(
     );
     detach();
     await nextTick();
-    // iframe src가 실제로 변경될 때까지 약간 대기 후 재연결
     await new Promise((r) => setTimeout(r, 100));
     await connectToIframe();
   },
@@ -446,6 +463,7 @@ onBeforeUnmount(() => {
   z-index: 100;
   pointer-events: none;
   line-height: 1.5;
+  white-space: nowrap;
 }
 .pdf_overlay_tooltip strong {
   display: block;
@@ -484,6 +502,7 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: #cbd5e1;
   line-height: 1.4;
+  white-space: normal;
 }
 
 /* ── 연결 대기 ── */
