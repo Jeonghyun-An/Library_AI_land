@@ -1083,7 +1083,14 @@ class ComparativeConstitutionChunker:
 
             if has_en and has_ko:
                 text_type = "bilingual"
-                search_text = (en_text + "\n" + ko_text).strip()
+                # ★ v3.11: 2단 bilingual 문서는 한국어를 search_text main으로 사용
+                # 영어는 english_text 필드에 보존 (metadata/참조용)
+                # 이유: 사용자가 한국어로 질의 → 한국어 청크가 검색에 걸려야
+                #       한국어 bbox(우측 컬럼)가 하이라이팅됨
+                if is_two_column:
+                    search_text = ko_text  # 한국어만 검색 인덱스
+                else:
+                    search_text = (en_text + "\n" + ko_text).strip()
             elif has_en:
                 text_type = "english_only"
                 search_text = en_text
@@ -1241,76 +1248,93 @@ class ComparativeConstitutionChunker:
                 # ──────────────────────────────────────
                 left_lines, right_lines = col_pair
 
-                # 좌측 컬럼 처리 (원문 - 한국어 또는 외국어)
-                for ln in left_lines:
-                    text = ln["text"]
-                    bbox = ln.get("bbox")
-                    art = _extract_article_no_safe(text)
-                    if art:
-                        flush()
-                        article_bbox_acc.clear()
-                        current["article_no"] = art
-                        current["paragraph_no"] = None
-                        lang_hint_ln = "KO" if RE_KO_ARTICLE.match(text.lstrip()) else "EN"
-                        current["display_path"] = _build_display_path(art, lang_hint_ln)
-                        current["structure"] = {"article_number": art}
-                        current["page"] = page_no
-                        # ★ 좌측 컬럼 언어 저장 → flush()의 앵커링 패턴에 사용
-                        current["col_lang_hint"] = lang_hint_ln
+                # ★ v3.12: 2단 유형 자동 판별
+                #
+                # [유형 A] 신문형 — 양쪽 모두 같은 언어 (한국어+한국어, 영어+영어 등)
+                #   예) 아르헨티나: 좌=제120~124조(한국어), 우=제125~127조(한국어)
+                #   처리: 좌→우 순서로 이어붙여 1단처럼 처리 (모든 조항 누락 없이 청킹)
+                #
+                # [유형 B] 이중언어형 — 한쪽 한국어, 반대쪽 외국어
+                #   예) UAE: 좌=영어원문, 우=한국어번역
+                #   처리: 한국어 컬럼 bbox 기준, 외국어 컬럼은 search_text 보강용
+                #
+                # [유형 C] 이중언어형 — 양쪽 모두 외국어
+                #   처리: 좌→우 이어붙여 1단처럼 처리
+
+                left_total = max(len(left_lines), 1)
+                right_total = max(len(right_lines), 1)
+                left_ko_ratio = sum(1 for ln in left_lines if _has_hangul(ln["text"])) / left_total
+                right_ko_ratio = sum(1 for ln in right_lines if _has_hangul(ln["text"])) / right_total
+
+                both_ko   = left_ko_ratio >= 0.6 and right_ko_ratio >= 0.6
+                neither_ko = left_ko_ratio < 0.3 and right_ko_ratio < 0.3
+                is_newspaper = both_ko or neither_ko  # 유형 A or C
+
+                def _process_lines_single(lines_seq, lang_hint_default="KO"):
+                    """1단처럼 lines를 순서대로 처리하는 공통 로직."""
+                    for ln in lines_seq:
+                        text = ln["text"]
+                        bbox = ln.get("bbox")
+                        art = _extract_article_no_safe(text)
+                        if art:
+                            flush()
+                            article_bbox_acc.clear()
+                            current["article_no"] = art
+                            current["paragraph_no"] = None
+                            current["page"] = page_no
+                            lh = "KO" if RE_KO_ARTICLE.match(text.lstrip()) else lang_hint_default
+                            current["col_lang_hint"] = lh
+                            current["display_path"] = _build_display_path(art, lh)
+                            current["structure"] = {"article_number": art}
+                            if bbox is not None:
+                                _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
+                                _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
+                            if _has_hangul(text):
+                                current["ko_lines"].append(ln)
+                                current["page_ko"] = current["page_ko"] or page_no
+                                current["page_korean"] = current["page_korean"] or page_no
+                            else:
+                                current["en_lines"].append(ln)
+                                current["page_en"] = current["page_en"] or page_no
+                                current["page_english"] = current["page_english"] or page_no
+                            continue
+
+                        if _has_hangul(text):
+                            current["ko_lines"].append(ln)
+                            current["page_ko"] = current["page_ko"] or page_no
+                            current["page_korean"] = current["page_korean"] or page_no
+                        else:
+                            current["en_lines"].append(ln)
+                            current["page_en"] = current["page_en"] or page_no
+                            current["page_english"] = current["page_english"] or page_no
+
+                        current["page"] = current["page"] or page_no
                         if bbox is not None:
                             _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
                             _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
-                        # ★ 헤더 라인 텍스트도 lines에 추가
-                        if _has_hangul(text):
-                            current["ko_lines"].append(ln)
-                            if current["page_ko"] is None:
-                                current["page_ko"] = page_no
-                            if current["page_korean"] is None:
-                                current["page_korean"] = page_no
-                        else:
-                            current["en_lines"].append(ln)
-                            if current["page_en"] is None:
-                                current["page_en"] = page_no
-                            if current["page_english"] is None:
-                                current["page_english"] = page_no
-                        continue  # ★ 이중 누적 방지: 아래 공통 bbox 블록 건너뜀
 
-                    if _has_hangul(text):
-                        current["ko_lines"].append(ln)
-                        if current["page_ko"] is None:
-                            current["page_ko"] = page_no
-                        if current["page_korean"] is None:
-                            current["page_korean"] = page_no
+                if is_newspaper:
+                    # ── 유형 A/C: 신문형 — 좌→우 순서로 1단처럼 처리 ──
+                    _process_lines_single(left_lines + right_lines)
+
+                else:
+                    # ── 유형 B: 이중언어형 — 한국어 컬럼 bbox 기준 ──
+                    if left_ko_ratio >= right_ko_ratio:
+                        ko_col, foreign_col = left_lines, right_lines
                     else:
-                        current["en_lines"].append(ln)
-                        if current["page_en"] is None:
-                            current["page_en"] = page_no
-                        if current["page_english"] is None:
-                            current["page_english"] = page_no
+                        ko_col, foreign_col = right_lines, left_lines
 
-                    if current["page"] is None:
-                        current["page"] = page_no
-                    if bbox is not None:
-                        _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
-                        _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
+                    # 한국어 컬럼: 텍스트 + bbox 누적, 조항 경계 담당
+                    _process_lines_single(ko_col, lang_hint_default="KO")
 
-                # 우측 컬럼 처리 (번역문)
-                # 우측은 별도의 bbox_acc에 누적하지 않음 (좌측 원문의 bbox만 사용)
-                # 단, 번역 텍스트는 search_text에 포함
-                for ln in right_lines:
-                    text = ln["text"]
-                    if _has_hangul(text):
-                        current["ko_lines"].append(ln)
-                        if current["page_ko"] is None:
-                            current["page_ko"] = page_no
-                        if current["page_korean"] is None:
-                            current["page_korean"] = page_no
-                    else:
+                    # 외국어 컬럼: 텍스트만 search_text 보강 (bbox 누적 안 함)
+                    for ln in foreign_col:
+                        text = ln["text"]
+                        if _extract_article_no_safe(text):
+                            continue  # 조항 헤더 스킵 (이미 한국어 컬럼에서 처리)
                         current["en_lines"].append(ln)
-                        if current["page_en"] is None:
-                            current["page_en"] = page_no
-                        if current["page_english"] is None:
-                            current["page_english"] = page_no
+                        current["page_en"] = current["page_en"] or page_no
+                        current["page_english"] = current["page_english"] or page_no
 
         flush()
         doc.close()
