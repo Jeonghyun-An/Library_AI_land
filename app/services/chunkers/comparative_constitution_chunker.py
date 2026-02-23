@@ -41,7 +41,20 @@ import fitz  # PyMuPDF
 # =========================
 RE_KO_ARTICLE = re.compile(r"^\s*제\s*(\d+)\s*조(?:\s|①②③④⑤⑥⑦⑧⑨⑩|$|\(|\[|의|【|〔)")
 RE_KO_ARTICLE_BODY = re.compile(r"^제\s*(\d+)\s*조(?:\s|①②③④⑤⑥⑦⑧⑨⑩|$|\(|\[|의|【|〔)")
+# ★ v3.11: 본문 참조("Article 151 of this Constitution.") 오탐 방지
+# - 헤더: "Article (숫자)" 괄호형, 또는 줄에 Article+숫자만 있는 경우
+# - 본문참조: 번호 뒤에 of/the/this/that 등 실질 텍스트 → 헤더 아님
 RE_EN_ARTICLE = re.compile(r"^\s*Article\s*\(?\s*(\d+)\s*\)?\b", re.IGNORECASE)
+RE_EN_ARTICLE_BODY_REF = re.compile(
+    r"^\s*Article\s+\d+\s+(?:of|the|this|that|in|to|a|an|which|shall|provides|is|are|and|or|has|have|was|were)\b",
+    re.IGNORECASE,
+)
+RE_EN_ARTICLE_HEADER = re.compile(
+    r"^\s*Article\s*\(?\s*(\d+)\s*\)?\.?\s*$", re.IGNORECASE  # 줄에 번호만
+)
+RE_EN_ARTICLE_PAREN = re.compile(
+    r"^\s*Article\s*\(\s*(\d+)\s*\)", re.IGNORECASE  # 괄호형 Article (N)
+)
 
 RE_PAGE_NUM_ONLY = re.compile(r"^\s*[-–—]?\s*\d+\s*[-–—]?\s*$")
 RE_INDEX_FRAGMENT = re.compile(r"^\s*제\s*\d+\s*조\s*제\s*\d+\s*(항|호)\b.*$")
@@ -202,27 +215,27 @@ def _union_bbox_info(
 # =========================
 # ★ v3.9 신규: 컬럼 레이아웃 자동 감지
 # =========================
-def _detect_column_layout(doc: fitz.Document, sample_pages: int = 5) -> Dict[str, Any]:
+def _detect_column_layout(doc: fitz.Document, sample_pages: int = 8) -> Dict[str, Any]:
     """
-    PDF의 컬럼 구조를 자동 감지합니다.
+    PDF의 컬럼 구조를 자동 감지합니다 (v3.11).
 
     반환:
         {
             "is_two_column": bool,   # True면 2단 레이아웃
-            "col_mid": float,        # 2단일 때 좌/우 분기 x좌표 (페이지 폭 기준)
+            "col_mid": float,        # 2단일 때 좌/우 분기 x좌표 (절대값 pt)
             "col_gap": float,        # 2단일 때 중앙 공백 폭 추정치
         }
 
-    판단 기준:
-        - 샘플 페이지에서 단어 x좌표 분포를 히스토그램화
-        - 페이지 중앙 구간(30%~70%)에 단어가 현저히 적으면(밀도 < 임계값) 2단으로 판정
-        - 좌/우 단어 수 비율이 각각 15% 이상이어야 2단
+    v3.11 판단 방식 - "단어 커버리지 갭" 탐지:
+        x0/x1 기반 단어 커버리지 히스토그램에서 실제로 단어가 없는 x 구간을 탐지.
+        - x0 기반 갭은 우측 컬럼 시작점을 갭 끝으로 잡아 col_mid가 왼쪽으로 치우치는 문제.
+        - 단어 커버리지(각 bin에 단어가 하나라도 걸치면 covered)를 보면
+          좌측 컬럼 x1 ~ 우측 컬럼 x0 사이 실제 공백이 드러남.
     """
     if len(doc) == 0:
         return {"is_two_column": False, "col_mid": 0.5, "col_gap": 0.0}
 
     n_sample = min(sample_pages, len(doc))
-    # 앞쪽 목차 페이지 스킵을 위해 중간부터 샘플링
     start_idx = max(0, len(doc) // 4)
     sample_indices = []
     step = max(1, (len(doc) - start_idx) // n_sample)
@@ -233,9 +246,10 @@ def _detect_column_layout(doc: fitz.Document, sample_pages: int = 5) -> Dict[str
     if not sample_indices:
         sample_indices = list(range(min(n_sample, len(doc))))
 
-    # 각 페이지의 단어 x 중점(midX) 수집
-    all_mid_x_ratios: List[float] = []  # 페이지 폭 대비 비율
     page_widths: List[float] = []
+    # coverage[bin] = 이 bin을 커버하는 단어 수
+    BINS = 60
+    coverage = [0] * BINS
 
     for pidx in sample_indices:
         page = doc[pidx]
@@ -247,89 +261,74 @@ def _detect_column_layout(doc: fitz.Document, sample_pages: int = 5) -> Dict[str
             continue
         page_widths.append(pw)
         for w in words:
-            mid_x = (w[0] + w[2]) / 2.0
-            all_mid_x_ratios.append(mid_x / pw)
+            wx0, wx1 = w[0] / pw, w[2] / pw
+            b0 = max(0, int(wx0 * BINS))
+            b1 = min(BINS - 1, int(wx1 * BINS))
+            for b in range(b0, b1 + 1):
+                coverage[b] += 1
 
-    if not all_mid_x_ratios:
+    if not page_widths:
         return {"is_two_column": False, "col_mid": 0.5, "col_gap": 0.0}
 
-    # 히스토그램: 10% 구간으로 분할 (0~0.1, 0.1~0.2, ..., 0.9~1.0)
-    bins = 10
-    hist = [0] * bins
-    for r in all_mid_x_ratios:
-        idx = min(int(r * bins), bins - 1)
-        hist[idx] += 1
-
-    total = sum(hist)
-    if total == 0:
+    avg_pw = sum(page_widths) / len(page_widths)
+    total_words = max(coverage)
+    if total_words == 0:
         return {"is_two_column": False, "col_mid": 0.5, "col_gap": 0.0}
 
-    # 중앙 구간(3,4,5 번 = 30%~60%) 밀도
-    center_count = sum(hist[3:6])
-    center_ratio = center_count / total
+    # 20%~80% 구간(bin 12~47)에서 커버리지가 낮은 갭 탐지
+    # 갭 = 커버리지가 전체 피크의 5% 미만인 bin들이 연속
+    GAP_THRESHOLD = total_words * 0.05
+    MIN_GAP_BINS = 2       # 최소 2bin 연속 (≈ 3.3%)
+    search_start, search_end = 12, 48
 
-    # 좌측(0~40%), 우측(60%~100%) 단어 비율
-    left_count = sum(hist[0:4])
-    right_count = sum(hist[6:10])
-    left_ratio = left_count / total
-    right_ratio = right_count / total
+    gaps = []
+    in_gap = False
+    gap_start_b = 0
+    for i in range(search_start, search_end):
+        if coverage[i] <= GAP_THRESHOLD:
+            if not in_gap:
+                in_gap = True
+                gap_start_b = i
+        else:
+            if in_gap:
+                in_gap = False
+                gap_len = i - gap_start_b
+                if gap_len >= MIN_GAP_BINS:
+                    gaps.append((gap_start_b, i - 1))
+    if in_gap:
+        gap_len = search_end - gap_start_b
+        if gap_len >= MIN_GAP_BINS:
+            gaps.append((gap_start_b, search_end - 1))
 
-    # 2단 판정:
-    # - 중앙 밀도가 낮고 (< 15%)
-    # - 좌/우 각각 15% 이상
-    is_two_column = (
-        center_ratio < 0.15
-        and left_ratio >= 0.15
-        and right_ratio >= 0.15
-    )
+    is_two_column = False
+    col_mid_abs = avg_pw * 0.5
+    col_gap = 0.0
 
-    # col_mid: 중앙 공백의 중심 x 비율 추정
-    # 히스토그램에서 가장 밀도 낮은 중앙 구간 찾기
-    col_mid_ratio = 0.5
-    if is_two_column:
-        # 30%~70% 구간에서 최솟값 bin
-        min_bin = min(range(3, 7), key=lambda i: hist[i])
-        col_mid_ratio = (min_bin + 0.5) / bins  # bin 중심
+    if gaps:
+        # 가장 긴 갭 선택
+        best_gap = max(gaps, key=lambda g: g[1] - g[0])
+        g0, g1 = best_gap
+        gap_width_ratio = (g1 - g0 + 1) / BINS
 
-    avg_pw = sum(page_widths) / len(page_widths) if page_widths else 595.0
-    col_mid_abs = col_mid_ratio * avg_pw
+        # 갭이 페이지 폭의 2% 이상이어야 진짜 컬럼 분리선
+        if gap_width_ratio >= 0.02:
+            # 좌/우 커버리지 확인: 양쪽 모두 충분히 있어야 2단
+            left_cov = sum(coverage[:g0])
+            right_cov = sum(coverage[g1 + 1:])
+            total_cov = sum(coverage)
+            if total_cov > 0 and left_cov / total_cov >= 0.10 and right_cov / total_cov >= 0.10:
+                is_two_column = True
+                gap_mid_ratio = (g0 + g1 + 1) / 2.0 / BINS
+                col_mid_abs = gap_mid_ratio * avg_pw
+                col_gap = gap_width_ratio * avg_pw
 
-    # gap 추정: 중앙 공백 폭 (히스토그램에서 연속으로 낮은 구간)
-    gap_bins = 0
-    for i in range(3, 7):
-        if hist[i] / total < 0.05:
-            gap_bins += 1
-    col_gap = gap_bins * (avg_pw / bins)
+    print(f"[Chunker] 레이아웃 감지: is_two_column={is_two_column}, col_mid={col_mid_abs:.1f}, gaps={gaps}")
 
     return {
         "is_two_column": is_two_column,
         "col_mid": col_mid_abs,
         "col_gap": col_gap,
     }
-
-
-# =========================
-# Page extraction helpers
-# =========================
-def _page_words(page: fitz.Page):
-    return page.get_text("words")
-
-
-def _page_lines_from_dict(page: fitz.Page) -> List[Dict[str, Any]]:
-    d = page.get_text("dict")
-    out: List[Dict[str, Any]] = []
-    for b in d.get("blocks", []):
-        if b.get("type") != 0:
-            continue
-        for ln in b.get("lines", []):
-            text = " ".join(sp.get("text", "") for sp in ln.get("spans", []))
-            text = _normalize_line(text)
-            if not text:
-                continue
-            bbox = fitz.Rect(ln.get("bbox", [0, 0, 0, 0]))
-            out.append({"text": text, "bbox": bbox})
-    return out
-
 
 def _words_to_lines(words: List[Tuple], tol: float = 3.0) -> List[Dict[str, Any]]:
     if not words:
@@ -348,6 +347,23 @@ def _words_to_lines(words: List[Tuple], tol: float = 3.0) -> List[Dict[str, Any]
         x1 = max(w[2] for w in row)
         y1 = max(w[3] for w in row)
         out.append({"text": text, "bbox": fitz.Rect(x0, y0, x1, y1)})
+    return out
+
+
+def _page_lines_from_dict(page: fitz.Page) -> List[Dict[str, Any]]:
+    """PyMuPDF dict 방식으로 라인 추출. bbox가 실제 텍스트 폭 그대로 잡힘."""
+    d = page.get_text("dict")
+    out: List[Dict[str, Any]] = []
+    for b in d.get("blocks", []):
+        if b.get("type") != 0:
+            continue
+        for ln in b.get("lines", []):
+            text = " ".join(sp.get("text", "") for sp in ln.get("spans", []))
+            text = _normalize_line(text)
+            if not text:
+                continue
+            bbox = fitz.Rect(ln.get("bbox", [0, 0, 0, 0]))
+            out.append({"text": text, "bbox": bbox})
     return out
 
 
@@ -401,11 +417,18 @@ def _page_lines_two_column(
     right_lines = _words_to_lines(right_words)
     center_lines = _words_to_lines(center_words)
 
-    # 중앙 걸침 라인(헤더, 제목 등)은 양쪽에 추가
-    # → 조문 감지에 활용하되 중복 방지를 위해 left에만 추가
-    # (청킹 로직에서 article_no 감지 시 어느 컬럼에서 감지해도 동일하게 처리됨)
-    combined_left = center_lines + left_lines
-    combined_right = center_lines + right_lines
+    # 중앙 걸침 라인(헤더, 제목 등)은 양쪽에 y좌표 순서로 삽입
+    # ★ 수정: center_lines + left_lines 단순 concat 금지
+    #   → center가 앞에 오면 Article 149 본문이 Article 151 헤더보다 앞에 정렬돼
+    #     151조 para_bbox_acc에 149 y좌표가 섞이는 버그 발생
+    # → y0 기준으로 merge하여 실제 페이지 순서를 보장
+    def _merge_by_y(a, b):
+        merged = a + b
+        merged.sort(key=lambda ln: ln["bbox"].y0 if ln.get("bbox") is not None else 0)
+        return merged
+
+    combined_left  = _merge_by_y(center_lines, left_lines)
+    combined_right = _merge_by_y(center_lines, right_lines)
 
     return combined_left, combined_right
 
@@ -495,16 +518,42 @@ def _remove_repeated_edge_lines(pages_lines, top_rep, bot_rep, top_k=2, bottom_k
 # Article extraction helpers
 # =========================
 def _extract_article_no_safe(line: str) -> Optional[str]:
-    """조문 번호 추출 (\\b 없이 너그럽게)."""
-    m = RE_KO_ARTICLE.match(line.lstrip())
+    """
+    조문 번호 추출 (v3.11).
+
+    EN 오탐 방지:
+        "Article 151 of this Constitution." 처럼 본문 안에서 조항을 참조하는 경우
+        줄 시작이 Article이어도 헤더로 오인하지 않도록 강화.
+        - 괄호형 Article (N) → 헤더
+        - 줄에 Article + 번호만 있으면 → 헤더
+        - 번호 뒤에 of/the/this/that 등 실질 단어 → 본문 참조, None 반환
+    """
+    stripped = line.lstrip()
+
+    # 한국어 조항 헤더
+    m = RE_KO_ARTICLE.match(stripped)
     if m:
         return m.group(1)
-    m = RE_EN_ARTICLE.match(line.lstrip())
+
+    # 영어: 본문 참조이면 스킵
+    if RE_EN_ARTICLE_BODY_REF.match(stripped):
+        return None
+
+    # 영어: 줄에 번호만 (Article 151 / Article 1.)
+    m = RE_EN_ARTICLE_HEADER.match(stripped)
     if m:
         return m.group(1)
-    m2 = re.match(r"^\d+\s+제\s*(\d+)\s*조", line.strip())
+
+    # 영어: 괄호형 Article (N) — 뒤에 텍스트 있어도 헤더
+    m = RE_EN_ARTICLE_PAREN.match(stripped)
+    if m:
+        return m.group(1)
+
+    # 번호+공백+제N조 패턴 (목차 등)
+    m2 = re.match(r"^\d+\s+제\s*(\d+)\s*조", stripped)
     if m2:
         return m2.group(1)
+
     return None
 
 
@@ -690,6 +739,58 @@ def clamp_to_single_article_en(text: str, target_article_no: str) -> str:
 # =========================
 # Anchor bbox by header
 # =========================
+def _pick_header_rect(
+    rects: List[fitz.Rect],
+    body_acc: Optional[Dict[int, Dict[str, float]]],
+    page_no: int,
+    page_height: float,
+) -> Optional[fitz.Rect]:
+    """
+    search_for 결과(rects) 중 진짜 조항 헤더 rect를 선택한다.
+
+    선택 기준 (우선순위):
+      1. body_acc의 y0보다 위에 있는 rect 중 가장 위에 있는 것
+         → 헤더는 반드시 본문보다 먼저(위에) 나와야 한다.
+         → "제151조"가 149조 본문 안에 언급되어도 149조 y범위 내이므로 제외됨.
+      2. body_acc가 없거나 모든 rect가 body_acc y0 이하이면:
+         → 페이지 상단 절반 내에 있는 rect 중 가장 위에 있는 것
+      3. 그래도 없으면 None (앵커링 포기 → body_acc 그대로 사용)
+
+    핵심 조건: rect 높이(y1-y0)가 헤더 한 줄 높이(≤ 30pt)이어야 한다.
+    → 여러 줄에 걸친 본문 참조 블록은 제외됨.
+    """
+    if not rects:
+        return None
+
+    # 헤더 후보: 한 줄짜리(높이 ≤ 30pt)만
+    candidates = [r for r in rects if (r.y1 - r.y0) <= 30.0]
+    if not candidates:
+        # 높이 제한 완화 (최대 50pt)
+        candidates = [r for r in rects if (r.y1 - r.y0) <= 50.0]
+    if not candidates:
+        candidates = list(rects)
+
+    # body_acc의 최소 y0 구하기 (해당 페이지)
+    body_y0: Optional[float] = None
+    if body_acc and page_no in body_acc:
+        body_y0 = body_acc[page_no].get("y0")
+
+    if body_y0 is not None:
+        # 기준 1: body_y0 이상(같거나 더 위쪽)인 후보
+        above = [r for r in candidates if r.y0 <= body_y0 + 5.0]
+        if above:
+            return min(above, key=lambda r: r.y0)
+
+    # 기준 2: 페이지 상단 절반
+    half = page_height / 2.0
+    upper = [r for r in candidates if r.y0 < half]
+    if upper:
+        return min(upper, key=lambda r: r.y0)
+
+    # 기준 3: 그냥 가장 위에 있는 것
+    return min(candidates, key=lambda r: r.y0)
+
+
 def _anchor_bbox_by_article_header(
     doc: fitz.Document,
     *,
@@ -698,14 +799,25 @@ def _anchor_bbox_by_article_header(
     lang_hint: str,
     body_acc: Optional[Dict[int, Dict[str, float]]] = None,
 ) -> List[Dict[str, Any]]:
-    """조항 헤더 텍스트를 search_for로 찾아 bbox 앵커링."""
+    """
+    조항 헤더 텍스트를 search_for로 찾아 bbox 앵커링.
+
+    수정(v3.9.1):
+      - rects[0] 무조건 사용 → _pick_header_rect()로 교체
+      - "제151조"가 149조 본문 안에 언급될 때 잘못된 위치 앵커링 방지
+      - 헤더 후보: 한 줄 높이(≤ 30pt) + body_acc y0보다 위에 있는 것 우선
+    """
     if not article_no or not prefer_pages_1based:
         return []
-    patterns = (
-        [f"제{article_no}조", f"제 {article_no} 조"]
-        if lang_hint.upper() == "KO"
-        else [f"Article {article_no}", f"ARTICLE {article_no}"]
-    )
+
+    # KO/EN 양쪽 모두 패턴 시도 (bilingual 문서에서 lang_hint 오탐 방지)
+    if lang_hint.upper() == "KO":
+        patterns = [f"제{article_no}조", f"제 {article_no} 조"]
+        fallback_patterns = [f"Article {article_no}", f"ARTICLE {article_no}"]
+    else:
+        patterns = [f"Article {article_no}", f"ARTICLE {article_no}"]
+        fallback_patterns = [f"제{article_no}조", f"제 {article_no} 조"]
+
     for p1 in prefer_pages_1based:
         if not p1:
             continue
@@ -713,12 +825,17 @@ def _anchor_bbox_by_article_header(
         if pidx >= len(doc):
             continue
         page = doc[pidx]
+        page_height = page.rect.height
+        header_page = int(p1)
+
+        # 1차: lang_hint 기준 패턴
         for pat in patterns:
             rects = page.search_for(pat)
             if not rects:
                 continue
-            r = rects[0]
-            header_page = int(p1)
+            r = _pick_header_rect(rects, body_acc, header_page, page_height)
+            if r is None:
+                continue
             if body_acc:
                 if header_page in body_acc:
                     merged_acc = deepcopy(body_acc)
@@ -730,6 +847,27 @@ def _anchor_bbox_by_article_header(
             return [{"page": header_page, "page_index": header_page - 1,
                      "x0": float(r.x0), "y0": float(r.y0),
                      "x1": float(r.x1), "y1": float(r.y1)}]
+
+        # 2차: fallback 패턴 (lang_hint가 틀렸을 경우)
+        for pat in fallback_patterns:
+            rects = page.search_for(pat)
+            if not rects:
+                continue
+            r = _pick_header_rect(rects, body_acc, header_page, page_height)
+            if r is None:
+                continue
+            if body_acc:
+                if header_page in body_acc:
+                    merged_acc = deepcopy(body_acc)
+                    _accum_bbox(merged_acc, page_no=header_page,
+                                bbox=fitz.Rect(r.x0, r.y0, r.x1, r.y1))
+                    return _acc_to_boxes(merged_acc)
+                else:
+                    return _acc_to_boxes(body_acc)
+            return [{"page": header_page, "page_index": header_page - 1,
+                     "x0": float(r.x0), "y0": float(r.y0),
+                     "x1": float(r.x1), "y1": float(r.y1)}]
+
     return []
 
 
@@ -878,6 +1016,7 @@ class ComparativeConstitutionChunker:
                 "page_english": None,
                 "page_korean":  None,
                 "para_bbox_acc": {},
+                "col_lang_hint": None,  # ★ bilingual 2단: 좌측 컬럼 언어
             }
 
         current: Dict[str, Any] = _empty_current()
@@ -889,7 +1028,14 @@ class ComparativeConstitutionChunker:
             lang_hint: str,
             prefer_pages: List[int],
         ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-            if art_no and prefer_pages:
+            # ★ v3.10: 2단 문서면 앵커링 완전 건너뜀 (is_bilingual 무관)
+            # - para_acc에는 이미 좌측 컬럼(원문)의 정확한 bbox만 누적되어 있음
+            # - _anchor_bbox_by_article_header는 search_for로 우측(번역) 본문 내
+            #   조문 참조 텍스트를 잡아 x범위를 오염시킴 (예: 149조 본문의 제151조)
+            # - 따라서 2단이면 para_acc 그대로 사용
+            if is_two_column:
+                bbox_info = _acc_to_boxes(para_acc)
+            elif art_no and prefer_pages:
                 anchored = _anchor_bbox_by_article_header(
                     doc,
                     article_no=str(art_no),
@@ -945,7 +1091,11 @@ class ComparativeConstitutionChunker:
                 text_type = "korean_only"
                 search_text = ko_text
 
-            lang_hint = "KO" if has_ko else "EN"
+            # ★ col_lang_hint: bilingual 2단에서 좌측 컬럼 언어를 저장해둔 값
+            # 이를 앵커링 패턴에 사용 → 제151조가 149조 본문에 언급되어도
+            # 좌측 컬럼(Article 151) 기준으로 정확한 헤더를 찾을 수 있음
+            col_lang_hint = current.get("col_lang_hint")
+            lang_hint = col_lang_hint if col_lang_hint else ("KO" if has_ko else "EN")
             prefer_pages = []
             for k in ["page", "page_ko", "page_en", "page_korean", "page_english"]:
                 v = current.get(k)
@@ -998,10 +1148,11 @@ class ComparativeConstitutionChunker:
         for meta, lines, col_pair in kept:
             page_no = meta["page_no"]
 
-            if not is_bilingual:
+            # ★ v3.10: is_bilingual 파라미터 대신 is_two_column 자동 감지로 분기
+            # is_bilingual=False로 업로드해도 2단 PDF면 올바르게 처리됨
+            if not is_two_column or col_pair is None:
                 # ──────────────────────────────────────
-                # 1단 또는 비-이중언어 문서 처리
-                # (2단이어도 is_bilingual=False면 여기로)
+                # 1단 문서 처리 (단일 컬럼)
                 # ──────────────────────────────────────
                 process_lines = lines  # 전체 라인 사용
 
@@ -1084,55 +1235,32 @@ class ComparativeConstitutionChunker:
 
             else:
                 # ──────────────────────────────────────
-                # ★ v3.9: is_bilingual=True 경로
+                # ★ v3.10: is_two_column=True 경로
                 # 2단 문서: 좌측=원문, 우측=번역
-                # 컬럼별로 독립 처리 → 페이지 경계 문제 해결
+                # is_bilingual 파라미터와 무관하게 레이아웃 자동 감지로 진입
                 # ──────────────────────────────────────
-                if is_two_column and col_pair is not None:
-                    left_lines, right_lines = col_pair
+                left_lines, right_lines = col_pair
 
-                    # 좌측 컬럼 처리 (원문 - 한국어 또는 외국어)
-                    for ln in left_lines:
-                        text = ln["text"]
-                        bbox = ln.get("bbox")
-                        art = _extract_article_no_safe(text)
-                        if art:
-                            flush()
-                            article_bbox_acc.clear()
-                            current["article_no"] = art
-                            current["paragraph_no"] = None
-                            lang_hint_ln = "KO" if RE_KO_ARTICLE.match(text.lstrip()) else "EN"
-                            current["display_path"] = _build_display_path(art, lang_hint_ln)
-                            current["structure"] = {"article_number": art}
-                            current["page"] = page_no
-                            if bbox is not None:
-                                _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
-                                _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
-
-                        if _has_hangul(text):
-                            current["ko_lines"].append(ln)
-                            if current["page_ko"] is None:
-                                current["page_ko"] = page_no
-                            if current["page_korean"] is None:
-                                current["page_korean"] = page_no
-                        else:
-                            current["en_lines"].append(ln)
-                            if current["page_en"] is None:
-                                current["page_en"] = page_no
-                            if current["page_english"] is None:
-                                current["page_english"] = page_no
-
-                        if current["page"] is None:
-                            current["page"] = page_no
+                # 좌측 컬럼 처리 (원문 - 한국어 또는 외국어)
+                for ln in left_lines:
+                    text = ln["text"]
+                    bbox = ln.get("bbox")
+                    art = _extract_article_no_safe(text)
+                    if art:
+                        flush()
+                        article_bbox_acc.clear()
+                        current["article_no"] = art
+                        current["paragraph_no"] = None
+                        lang_hint_ln = "KO" if RE_KO_ARTICLE.match(text.lstrip()) else "EN"
+                        current["display_path"] = _build_display_path(art, lang_hint_ln)
+                        current["structure"] = {"article_number": art}
+                        current["page"] = page_no
+                        # ★ 좌측 컬럼 언어 저장 → flush()의 앵커링 패턴에 사용
+                        current["col_lang_hint"] = lang_hint_ln
                         if bbox is not None:
                             _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
                             _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
-
-                    # 우측 컬럼 처리 (번역문)
-                    # 우측은 별도의 bbox_acc에 누적하지 않음 (좌측 원문의 bbox만 사용)
-                    # 단, 번역 텍스트는 search_text에 포함
-                    for ln in right_lines:
-                        text = ln["text"]
+                        # ★ 헤더 라인 텍스트도 lines에 추가
                         if _has_hangul(text):
                             current["ko_lines"].append(ln)
                             if current["page_ko"] is None:
@@ -1145,44 +1273,44 @@ class ComparativeConstitutionChunker:
                                 current["page_en"] = page_no
                             if current["page_english"] is None:
                                 current["page_english"] = page_no
+                        continue  # ★ 이중 누적 방지: 아래 공통 bbox 블록 건너뜀
 
-                else:
-                    # 2단이 아닌 bilingual (1단으로 한/영 혼재)
-                    for ln in lines:
-                        text = ln["text"]
-                        bbox = ln.get("bbox")
-                        art = _extract_article_no_safe(text)
-                        if art:
-                            flush()
-                            article_bbox_acc.clear()
-                            current["article_no"] = art
-                            current["paragraph_no"] = None
-                            lang_hint_ln = "KO" if RE_KO_ARTICLE.match(text.lstrip()) else "EN"
-                            current["display_path"] = _build_display_path(art, lang_hint_ln)
-                            current["structure"] = {"article_number": art}
-                            current["page"] = page_no
-                            if bbox is not None:
-                                _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
-                                _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
+                    if _has_hangul(text):
+                        current["ko_lines"].append(ln)
+                        if current["page_ko"] is None:
+                            current["page_ko"] = page_no
+                        if current["page_korean"] is None:
+                            current["page_korean"] = page_no
+                    else:
+                        current["en_lines"].append(ln)
+                        if current["page_en"] is None:
+                            current["page_en"] = page_no
+                        if current["page_english"] is None:
+                            current["page_english"] = page_no
 
-                        if _has_hangul(text):
-                            current["ko_lines"].append(ln)
-                            if current["page_ko"] is None:
-                                current["page_ko"] = page_no
-                            if current["page_korean"] is None:
-                                current["page_korean"] = page_no
-                        else:
-                            current["en_lines"].append(ln)
-                            if current["page_en"] is None:
-                                current["page_en"] = page_no
-                            if current["page_english"] is None:
-                                current["page_english"] = page_no
+                    if current["page"] is None:
+                        current["page"] = page_no
+                    if bbox is not None:
+                        _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
+                        _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
 
-                        if current["page"] is None:
-                            current["page"] = page_no
-                        if bbox is not None:
-                            _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
-                            _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
+                # 우측 컬럼 처리 (번역문)
+                # 우측은 별도의 bbox_acc에 누적하지 않음 (좌측 원문의 bbox만 사용)
+                # 단, 번역 텍스트는 search_text에 포함
+                for ln in right_lines:
+                    text = ln["text"]
+                    if _has_hangul(text):
+                        current["ko_lines"].append(ln)
+                        if current["page_ko"] is None:
+                            current["page_ko"] = page_no
+                        if current["page_korean"] is None:
+                            current["page_korean"] = page_no
+                    else:
+                        current["en_lines"].append(ln)
+                        if current["page_en"] is None:
+                            current["page_en"] = page_no
+                        if current["page_english"] is None:
+                            current["page_english"] = page_no
 
         flush()
         doc.close()
