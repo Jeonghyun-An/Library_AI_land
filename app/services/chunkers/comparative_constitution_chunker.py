@@ -59,6 +59,20 @@ RE_EN_ARTICLE_PAREN = re.compile(
 RE_PAGE_NUM_ONLY = re.compile(r"^\s*[-–—]?\s*\d+\s*[-–—]?\s*$")
 RE_INDEX_FRAGMENT = re.compile(r"^\s*제\s*\d+\s*조\s*제\s*\d+\s*(항|호)\b.*$")
 
+# ★ v3.12: 구조 헤더 감지 (장/절/편/부/장 등 — 조항 번호 아닌 목차 구조)
+# 이런 줄은 메타데이터로만 저장하고 청크 본문에서 제외
+RE_STRUCT_HEADER = re.compile(
+    r"^\s*제?\s*[I이일이삼사오육칠팔구십IVXLC\d]+\s*"
+    r"(?:편|부|장|절|관|항|목|절|관)\s*[\S\s]{0,30}$"
+)
+# 더 단순한 패턴도 포함: "제2부 국가기관", "제1편 연방정부", "제1장 입법부", "제1절 하원"
+RE_STRUCT_HEADER_KO = re.compile(
+    r"^\s*제\s*[\dI이일이삼사오육칠팔구십]+\s*(?:편|부|장|절|관)\s*.{0,30}$"
+)
+RE_STRUCT_HEADER_ROMAN = re.compile(
+    r"^\s*(?:제\s*)?[IVXivx]+\s*(?:편|부|장|절|관)\s*.{0,30}$"
+)
+
 _RE_CIRCLED = re.compile(r"[①②③④⑤⑥⑦⑧⑨⑩]")
 
 
@@ -1017,6 +1031,7 @@ class ComparativeConstitutionChunker:
                 "page_korean":  None,
                 "para_bbox_acc": {},
                 "col_lang_hint": None,  # ★ bilingual 2단: 좌측 컬럼 언어
+                "structure_context": {},  # ★ v3.12: 편/부/장/절 메타데이터
             }
 
         current: Dict[str, Any] = _empty_current()
@@ -1049,9 +1064,14 @@ class ComparativeConstitutionChunker:
             if bbox_info:
                 bbox_info = _union_bbox_info(bbox_info, pad_x=2.0, pad_y=1.5)
 
+            # ★ v3.12: article_bbox_acc는 현재 조 전체 bbox 누적용
+            # para_acc(항 bbox)보다 넓은 범위를 커버해야 함
+            # 단, 비어있으면 para bbox로 대체
             art_boxes = _acc_to_boxes(article_bbox_acc)
             if art_boxes:
                 art_boxes = _union_bbox_info(art_boxes, pad_x=3.0, pad_y=2.5)
+            else:
+                art_boxes = bbox_info  # 항 bbox가 곧 조 bbox
 
             return bbox_info, art_boxes
 
@@ -1123,6 +1143,9 @@ class ComparativeConstitutionChunker:
             structure: Dict[str, Any] = {"article_number": art_no} if art_no else {}
             if paragraph_no:
                 structure["paragraph"] = paragraph_no
+            # ★ v3.12: 편/부/장/절 구조 컨텍스트 병합
+            if current.get("structure_context"):
+                structure.update(current["structure_context"])
 
             chunks.append(
                 ConstitutionChunk(
@@ -1166,6 +1189,25 @@ class ComparativeConstitutionChunker:
                 for ln in process_lines:
                     text = ln["text"]
                     bbox = ln.get("bbox")
+
+                    # ★ v3.12: 구조 헤더(편/부/장/절) → 메타데이터만, 청크 제외
+                    _struct_lvl = None
+                    _t = text.strip()
+                    if _t and not _extract_article_no_safe(_t):
+                        _m = re.match(
+                            r"^제?\s*[\dIVXivx이일이삼사오육칠팔구십]+\s*(편|부|장|절|관)\s*.{0,40}$",
+                            _t
+                        )
+                        if _m:
+                            _struct_lvl = _m.group(1)
+                    if _struct_lvl:
+                        current["structure_context"][_struct_lvl] = _t
+                        _level_order = ["편", "부", "장", "절", "관"]
+                        if _struct_lvl in _level_order:
+                            _idx = _level_order.index(_struct_lvl)
+                            for _lower in _level_order[_idx + 1:]:
+                                current["structure_context"].pop(_lower, None)
+                        continue
 
                     art = _extract_article_no_safe(text)
                     if art:
@@ -1237,7 +1279,7 @@ class ComparativeConstitutionChunker:
                         current["page"] = page_no
 
                     if bbox is not None:
-                        _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
+                        # ★ v3.12: 본문 라인은 para_bbox_acc만 누적
                         _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
 
             else:
@@ -1270,11 +1312,48 @@ class ComparativeConstitutionChunker:
                 neither_ko = left_ko_ratio < 0.3 and right_ko_ratio < 0.3
                 is_newspaper = both_ko or neither_ko  # 유형 A or C
 
+                def _is_struct_header(text: str) -> Optional[str]:
+                    """
+                    편/부/장/절 구조 헤더인지 판별.
+                    반환: 구조 레벨 문자열 ("편"/"부"/"장"/"절"/"관") 또는 None
+                    조항 번호(제N조)는 여기서 False.
+                    """
+                    t = text.strip()
+                    if not t or _extract_article_no_safe(t):
+                        return None
+                    # "제2부", "제1편", "제1장", "제1절", "제II편", "제I절" 등
+                    m = re.match(
+                        r"^제?\s*[\dIVXivx이일이삼사오육칠팔구십]+\s*(편|부|장|절|관)\s*.{0,40}$",
+                        t
+                    )
+                    if m:
+                        return m.group(1)
+                    # "제4장 공무부", "제II편 주정부" 등 — 숫자 없이 레벨만
+                    m2 = re.match(r"^(제\d+편|제\d+부|제\d+장|제\d+절|제\d+관)", t)
+                    if m2:
+                        return m2.group(1)
+                    return None
+
                 def _process_lines_single(lines_seq, lang_hint_default="KO"):
                     """1단처럼 lines를 순서대로 처리하는 공통 로직."""
                     for ln in lines_seq:
                         text = ln["text"]
                         bbox = ln.get("bbox")
+
+                        # ★ v3.12: 구조 헤더(편/부/장/절) 감지 → 메타데이터만 저장, 청크 제외
+                        struct_level = _is_struct_header(text)
+                        if struct_level:
+                            # 현재 진행 중인 청크의 structure_context 업데이트
+                            # (다음 조항부터 이 컨텍스트가 structure에 포함됨)
+                            current["structure_context"][struct_level] = text.strip()
+                            # 하위 레벨 초기화 (새 장이 시작되면 이전 절 정보 제거)
+                            level_order = ["편", "부", "장", "절", "관"]
+                            if struct_level in level_order:
+                                idx = level_order.index(struct_level)
+                                for lower in level_order[idx + 1:]:
+                                    current["structure_context"].pop(lower, None)
+                            continue  # 청크 본문에 포함시키지 않음
+
                         art = _extract_article_no_safe(text)
                         if art:
                             flush()
@@ -1310,7 +1389,8 @@ class ComparativeConstitutionChunker:
 
                         current["page"] = current["page"] or page_no
                         if bbox is not None:
-                            _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
+                            # ★ v3.12: 본문 라인은 para_bbox_acc만 누적
+                            # article_bbox_acc는 조항 헤더 bbox 전용
                             _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
 
                 if is_newspaper:
