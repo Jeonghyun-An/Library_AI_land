@@ -10,11 +10,12 @@
     <!-- [S] left_menu_wrap -->
     <div class="left_menu_wrap" :class="{ open: hasSearched }">
       <div class="left_menu_hd">
-        <img
-          src="/img/layout/hd_logo.svg"
-          alt="법원도서관 AI 헌법 특화 에이전트"
-          class="hd_logo view_ctr"
-        />
+        <a href="#;" class="hd_logo view_ctr" @click.prevent="resetHome">
+          <img
+            src="/img/layout/hd_logo.svg"
+            alt="법원도서관 AI 헌법 특화 에이전트"
+          />
+        </a>
         <a href="#;" class="left_menu_trigger" aria-label="메뉴 열기"></a>
       </div>
       <div class="left_menu_con_wrap view_ctr">
@@ -305,13 +306,12 @@
                   class="inn"
                   @click.prevent="
                     searchQuery =
-                      '주요 국가 헌법 \'표현의 자유\' 조항 비교 해줘. (한국·미국·독일·일본 중심)';
+                      '주요 국가 헌법 \'표현의 자유\' 조항 비교 해줘.';
                     handleSearch();
                   "
                 >
                   <div class="item ellipsis line02">
                     주요 국가 헌법 '표현의 자유' 조항 비교 해줘.
-                    <br />(한국·미국·독일·일본 중심)
                   </div>
                   <div class="arr"></div>
                 </a>
@@ -1387,6 +1387,43 @@ const selectedCountryName = computed(() => {
 
 function getCountriesByContinent(continent) {
   return continentsWithCountries.value[continent] || [];
+}
+function resetHome() {
+  // UI 상태
+  hasSearched.value = false;
+  isSearching.value = false;
+
+  // 검색어/결과
+  currentSearchQuery.value = "";
+  searchQuery.value = "";
+  searchResult.value = null;
+
+  // 요약
+  countrySummary.value = null;
+  isGeneratingSummary.value = false;
+
+  // 선택 상태
+  selectedContinent.value = "korea";
+  selectedForeignCountry.value = null;
+  selectedKoreanIndex.value = 0;
+
+  // PDF/하이라이트 상태
+  koreanPdfUrl.value = null;
+  foreignPdfUrl.value = null;
+  koreanPdfPage.value = 1;
+  foreignPdfPage.value = 1;
+  koreanDocId.value = null;
+  foreignDocId.value = null;
+  koreanHighlightResults.value = [];
+  foreignHighlightResults.value = [];
+
+  _lastKorean.value = { docId: null, page: null };
+  _lastForeign.value = { docId: null, page: null, koreanIndex: null };
+
+  // 스크롤/포커스(원하면)
+  if (typeof window !== "undefined") {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 }
 
 // ==================== API 호출 ====================
