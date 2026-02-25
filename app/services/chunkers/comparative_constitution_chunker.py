@@ -1,30 +1,26 @@
 # app/services/chunkers/comparative_constitution_chunker.py
 """
-Comparative Constitution Chunker (v4.0 - 조/항 단위 전환 가능)
+Comparative Constitution Chunker (v4.1 - bbox 페이지 경계 clamp)
+
+v4.1 변경사항:
+────────────────────────────────────────────────────────────────
+  [버그픽스] 다음 페이지로 넘어가는 청크의 두 번째 페이지 bbox가
+            페이지 전체(y0≈57, y1≈816)로 잡히는 문제 해결.
+
+  핵심 변경:
+    1. _accum_bbox()에 page_height / bottom_margin / top_margin 파라미터 추가.
+       - 하단 여백(page_height - bottom_margin) 초과 bbox → y1 clamp
+       - 상단 여백(top_margin) 미만에서 시작하는 페이지 번호류 bbox → skip
+    2. 라인 스트림 dict에 "page_height" 키 추가 (_page_lines_from_dict 등).
+    3. _accum_bbox 모든 호출부에 page_height 전달.
+    4. _page_height_map: {page_no → page_height} 딕셔너리를 chunk() 내에서
+       한 번만 구성, 이후 모든 처리에서 참조.
 
 v4.0 변경사항:
 ────────────────────────────────────────────────────────────────
   chunk_granularity 파라미터 추가:
-    - "article"   : 조(條) 단위 청크. 모든 항을 하나의 청크로 합침.
-                    → 검색 recall 향상, 특히 단문 조항 누락 방지.
-                    → bbox_info = 조 전체 bbox (article_bbox_info와 동일)
-    - "paragraph" : 항(項) 단위 청크 (기존 v3.x 동작, 기본값).
-                    → 정밀 하이라이팅에 유리.
-
-  공개 API 변경:
-    chunk_constitution_document(..., chunk_granularity="article"|"paragraph")
-    ComparativeConstitutionChunker(..., chunk_granularity="article"|"paragraph")
-
-  하위 호환:
-    chunk_granularity 미지정 시 환경변수 CONSTITUTION_CHUNK_GRANULARITY 참조.
-    그것도 없으면 "paragraph" (기존 동작 유지).
-
-v3.9 핵심 설계 (그대로 유지):
-────────────────────────────────────────────────────────────────
-  1단/2단 자동 감지 (_detect_column_layout)
-  bbox_info / article_bbox_info 이중 레이어
-  2단 유형 A/B/C 자동 판별
-  v3.12 구조 헤더(편/부/장/절) 메타데이터화
+    - "article"   : 조(條) 단위 청크.
+    - "paragraph" : 항(項) 단위 청크 (기본값).
 ────────────────────────────────────────────────────────────────
 """
 
@@ -64,6 +60,7 @@ _RE_CIRCLED = re.compile(r"[①②③④⑤⑥⑦⑧⑨⑩]")
 
 _KO_NOISE_PATTERNS = [
     r"^\s*법제처\s*\d+\s*$",
+    r"^\s*법제처\s*\d*\s*국가법령정보센터?\s*$",
     r"^\s*대한민국\s*헌법\s*$",
     r"^\s*대한민국헌법\s*$",
     r"^\s*대한민국헌법\s*\[\s*대한민국\s*\]\s*$",
@@ -73,6 +70,13 @@ _KO_NOISE_PATTERNS = [
 _EN_NOISE_PATTERNS = [
     r"^\s*Page\s+\d+\s*$",
 ]
+
+# =========================
+# v4.1: bbox clamp 상수
+# =========================
+# 페이지 상/하단에서 이 값 이내의 bbox는 헤더/푸터로 간주해 clamp 또는 skip
+_BBOX_TOP_MARGIN: float = 45.0     # 상단 45pt 이내 → 페이지 번호 등 skip
+_BBOX_BOTTOM_MARGIN: float = 45.0  # 하단 45pt 이내 → 푸터 clamp
 
 
 # =========================
@@ -132,17 +136,50 @@ def _normalize_line(s: str) -> str:
     return s.strip()
 
 
+# ★ v4.1: page_height / margin 파라미터 추가
 def _accum_bbox(
     acc: Dict[int, Dict[str, float]],
     *,
     page_no: int,
     bbox: fitz.Rect,
+    page_height: float = 0.0,
+    top_margin: float = _BBOX_TOP_MARGIN,
+    bottom_margin: float = _BBOX_BOTTOM_MARGIN,
 ) -> None:
+    """
+    페이지별 bbox union 누적.
+
+    v4.1 변경:
+    - page_height > 0 이면 상/하단 여백 영역을 처리:
+        * bbox 전체가 상단 여백(y1 <= top_margin) 안에 있으면 skip (페이지 번호)
+        * bbox 전체가 하단 여백(y0 >= page_height - bottom_margin) 안이면 skip (푸터)
+        * bbox 하단(y1)이 하단 여백 경계를 넘으면 y1을 clamp
+    """
     if not bbox or page_no <= 0:
         return
     x0, y0, x1, y1 = float(bbox.x0), float(bbox.y0), float(bbox.x1), float(bbox.y1)
     if x1 <= x0 or y1 <= y0:
         return
+
+    # ★ v4.1: 페이지 높이 기반 clamp
+    if page_height > 0:
+        content_top = top_margin
+        content_bottom = page_height - bottom_margin
+
+        # 상단 여백 전체에 속하는 bbox → skip (페이지 번호, 헤더)
+        if y1 <= content_top:
+            return
+        # 하단 여백 전체에 속하는 bbox → skip (푸터, 법제처 표기 등)
+        if y0 >= content_bottom:
+            return
+        # y1이 하단 여백 경계를 넘으면 clamp
+        y1 = min(y1, content_bottom)
+        # y0이 상단 여백 경계 미만이면 clamp
+        y0 = max(y0, content_top - top_margin)  # 완전 clamp는 하지 않음 (조 헤더 bbox 보존)
+
+        if y1 <= y0:
+            return
+
     if page_no not in acc:
         acc[page_no] = {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
     else:
@@ -326,8 +363,10 @@ def _words_to_lines(words: List[Tuple], tol: float = 3.0) -> List[Dict[str, Any]
     return out
 
 
+# ★ v4.1: 라인 dict에 page_height 포함
 def _page_lines_from_dict(page: fitz.Page) -> List[Dict[str, Any]]:
     d = page.get_text("dict")
+    page_height = page.rect.height  # ★ v4.1
     out: List[Dict[str, Any]] = []
     for b in d.get("blocks", []):
         if b.get("type") != 0:
@@ -338,7 +377,7 @@ def _page_lines_from_dict(page: fitz.Page) -> List[Dict[str, Any]]:
             if not text:
                 continue
             bbox = fitz.Rect(ln.get("bbox", [0, 0, 0, 0]))
-            out.append({"text": text, "bbox": bbox})
+            out.append({"text": text, "bbox": bbox, "page_height": page_height})  # ★ v4.1
     return out
 
 
@@ -352,6 +391,7 @@ def _page_lines_two_column(
     col_gap: float = 10.0,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     margin = max(col_gap * 0.3, 5.0)
+    page_height = page.rect.height  # ★ v4.1
     words = page.get_text("words")
     left_words = []
     right_words = []
@@ -372,6 +412,10 @@ def _page_lines_two_column(
     left_lines  = _words_to_lines(left_words)
     right_lines = _words_to_lines(right_words)
     center_lines = _words_to_lines(center_words)
+
+    # ★ v4.1: 두 컬럼 라인에도 page_height 추가
+    for ln in left_lines + right_lines + center_lines:
+        ln["page_height"] = page_height
 
     def _merge_by_y(a, b):
         merged = a + b
@@ -704,6 +748,7 @@ def _anchor_bbox_by_article_header(
     prefer_pages_1based: List[int],
     lang_hint: str,
     body_acc: Optional[Dict[int, Dict[str, float]]] = None,
+    page_height_map: Optional[Dict[int, float]] = None,  # ★ v4.1
 ) -> List[Dict[str, Any]]:
     if not article_no or not prefer_pages_1based:
         return []
@@ -735,8 +780,11 @@ def _anchor_bbox_by_article_header(
             if body_acc:
                 if header_page in body_acc:
                     merged_acc = deepcopy(body_acc)
+                    # ★ v4.1: page_height 전달
+                    ph = (page_height_map or {}).get(header_page, page_height)
                     _accum_bbox(merged_acc, page_no=header_page,
-                                bbox=fitz.Rect(r.x0, r.y0, r.x1, r.y1))
+                                bbox=fitz.Rect(r.x0, r.y0, r.x1, r.y1),
+                                page_height=ph)
                     return _acc_to_boxes(merged_acc)
                 else:
                     return _acc_to_boxes(body_acc)
@@ -754,8 +802,10 @@ def _anchor_bbox_by_article_header(
             if body_acc:
                 if header_page in body_acc:
                     merged_acc = deepcopy(body_acc)
+                    ph = (page_height_map or {}).get(header_page, page_height)
                     _accum_bbox(merged_acc, page_no=header_page,
-                                bbox=fitz.Rect(r.x0, r.y0, r.x1, r.y1))
+                                bbox=fitz.Rect(r.x0, r.y0, r.x1, r.y1),
+                                page_height=ph)
                     return _acc_to_boxes(merged_acc)
                 else:
                     return _acc_to_boxes(body_acc)
@@ -827,6 +877,12 @@ class ComparativeConstitutionChunker:
 
         doc = fitz.open(pdf_path)
 
+        # ★ v4.1: 페이지 높이 맵 한 번에 구성 {page_no(1-based) → height_pt}
+        page_height_map: Dict[int, float] = {
+            pidx + 1: doc[pidx].rect.height
+            for pidx in range(len(doc))
+        }
+
         if self.auto_detect_columns:
             layout = _detect_column_layout(doc)
         else:
@@ -840,7 +896,7 @@ class ComparativeConstitutionChunker:
         col_mid: float = layout["col_mid"]
         col_gap: float = layout["col_gap"]
 
-        print(f"[Chunker] v4.0 레이아웃: {'2단' if is_two_column else '1단'} "
+        print(f"[Chunker] v4.1 레이아웃: {'2단' if is_two_column else '1단'} "
               f"(col_mid={col_mid:.1f}, col_gap={col_gap:.1f}) "
               f"| chunk_granularity={self.chunk_granularity}")
 
@@ -876,10 +932,10 @@ class ComparativeConstitutionChunker:
 
         # 반복 엣지 라인 제거
         top_rep, bot_rep = _detect_repeated_edge_lines(
-            pages_lines, 
-            top_k=4,      # 2 → 4: 상단 4줄까지 체크
-            bottom_k=2, 
-            thr=0.25      # 0.4 → 0.25: 25% 이상 반복되면 헤더로 간주
+            pages_lines,
+            top_k=4,
+            bottom_k=2,
+            thr=0.25
         )
         pages_lines = _remove_repeated_edge_lines(pages_lines, top_rep, bot_rep)
 
@@ -916,12 +972,14 @@ class ComparativeConstitutionChunker:
                 doc, kept, doc_id=doc_id, country=country,
                 constitution_title=constitution_title, version=version,
                 is_two_column=is_two_column,
+                page_height_map=page_height_map,  # ★ v4.1
             )
         else:
             return self._chunk_paragraph_level(
                 doc, kept, doc_id=doc_id, country=country,
                 constitution_title=constitution_title, version=version,
                 is_two_column=is_two_column,
+                page_height_map=page_height_map,  # ★ v4.1
             )
 
     # ──────────────────────────────────────────────────────────────
@@ -937,19 +995,15 @@ class ComparativeConstitutionChunker:
         constitution_title: str,
         version: Optional[str],
         is_two_column: bool,
+        page_height_map: Dict[int, float],  # ★ v4.1
     ) -> List[ConstitutionChunk]:
         """
         조(條) 단위 청킹.
-        - 항(①②③)을 별도 청크로 쪼개지 않고, 같은 조에 속한 모든 항을 하나로 합침.
-        - bbox_info = article_bbox_info = 조 전체 bbox (단순화).
-        - 검색 recall 향상 및 단문 조항 누락 방지.
         """
         chunks: List[ConstitutionChunk] = []
         seq = 0
 
-        # 현재 진행 중인 조 버퍼
         buf = _ArticleBuffer()
-        # 조 전체 bbox (현재 조의 모든 라인 bbox 합산)
         article_bbox_acc: Dict[int, Dict[str, float]] = {}
         structure_context: Dict[str, Any] = {}
 
@@ -1002,12 +1056,10 @@ class ComparativeConstitutionChunker:
                 if v and int(v) not in prefer_pages:
                     prefer_pages.append(int(v))
 
-            # 조 단위 bbox: article_bbox_acc 그대로 사용 (앵커링 없음 — 이미 라인 bbox 누적)
             art_boxes = _acc_to_boxes(article_bbox_acc)
             if art_boxes:
                 art_boxes = _union_bbox_info(art_boxes, pad_x=3.0, pad_y=2.5)
 
-            # 조 단위에서는 bbox_info == article_bbox_info (동일 범위)
             bbox_info = art_boxes
 
             display_path = _build_display_path(art_no or "?", lang_hint)
@@ -1041,7 +1093,6 @@ class ComparativeConstitutionChunker:
             buf = _ArticleBuffer()
             article_bbox_acc = {}
 
-        # 공통 구조 컨텍스트 (편/부/장/절)
         structure_context: Dict[str, Any] = {}
 
         def _is_struct_header(text: str) -> Optional[str]:
@@ -1075,15 +1126,15 @@ class ComparativeConstitutionChunker:
 
             text = ln["text"]
             bbox = ln.get("bbox")
+            # ★ v4.1: 라인에 저장된 page_height 우선, 없으면 맵에서 조회
+            ph = ln.get("page_height") or page_height_map.get(page_no, 0.0)
 
             if _update_struct_ctx(text):
                 return
 
             art = _extract_article_no_safe(text)
             if art:
-                # 새 조 시작 → 이전 조 flush
                 _flush_article()
-                # 새 버퍼 초기화
                 buf.article_no = art
                 buf.page = page_no
                 buf.structure_context = dict(structure_context)
@@ -1091,9 +1142,9 @@ class ComparativeConstitutionChunker:
                 buf.col_lang_hint = lh
 
                 if bbox is not None:
-                    _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
+                    # ★ v4.1: page_height 전달
+                    _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox, page_height=ph)
 
-                # 헤더 뒤에 본문이 붙어있는 경우 (제32조①...)
                 remainder = _extract_body_after_article_no(text, art)
                 if remainder:
                     fake_ln = dict(ln, text=remainder)
@@ -1106,10 +1157,9 @@ class ComparativeConstitutionChunker:
                         buf.page_en = buf.page_en or page_no
                         buf.page_english = buf.page_english or page_no
                     if bbox is not None:
-                        _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
+                        _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox, page_height=ph)  # ★ v4.1
                 return
 
-            # 본문 라인: 조 버퍼에 누적 (항 구분 없이)
             if _has_hangul(text):
                 buf.ko_lines.append(ln)
                 buf.page_ko = buf.page_ko or page_no
@@ -1122,9 +1172,8 @@ class ComparativeConstitutionChunker:
             buf.page = buf.page or page_no
 
             if bbox is not None:
-                _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
+                _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox, page_height=ph)  # ★ v4.1
 
-        # 메인 루프 (조 단위)
         for meta, lines, col_pair in kept:
             page_no = meta["page_no"]
 
@@ -1154,7 +1203,6 @@ class ComparativeConstitutionChunker:
                     for ln in ko_col:
                         _process_line_article(ln, page_no, lang_hint_default="KO")
 
-                    # 외국어 컬럼: 텍스트만 (bbox 누적 안 함)
                     for ln in foreign_col:
                         text = ln["text"]
                         if _extract_article_no_safe(text):
@@ -1163,10 +1211,9 @@ class ComparativeConstitutionChunker:
                         buf.page_en = buf.page_en or page_no
                         buf.page_english = buf.page_english or page_no
 
-        _flush_article()  # 마지막 조 처리
+        _flush_article()
         doc.close()
 
-        # 후처리: 너무 짧은 청크 제거
         cleaned: List[ConstitutionChunk] = []
         for ch in chunks:
             body = (ch.korean_text or "") + "\n" + (ch.english_text or "")
@@ -1175,11 +1222,11 @@ class ComparativeConstitutionChunker:
                     continue
             cleaned.append(ch)
 
-        print(f"[Chunker] v4.0 조 단위 청크 {len(cleaned)}개 생성")
+        print(f"[Chunker] v4.1 조 단위 청크 {len(cleaned)}개 생성")
         return cleaned
 
     # ──────────────────────────────────────────────────────────────
-    # 항 단위 청킹 (기존 v3.x 로직 — 변경 없음)
+    # 항 단위 청킹 (v3.12 로직 + v4.1 bbox clamp)
     # ──────────────────────────────────────────────────────────────
     def _chunk_paragraph_level(
         self,
@@ -1191,8 +1238,9 @@ class ComparativeConstitutionChunker:
         constitution_title: str,
         version: Optional[str],
         is_two_column: bool,
+        page_height_map: Dict[int, float],  # ★ v4.1
     ) -> List[ConstitutionChunk]:
-        """항(項) 단위 청킹 (v3.12 로직)."""
+        """항(項) 단위 청킹 (v3.12 로직 + v4.1 bbox clamp)."""
 
         chunks: List[ConstitutionChunk] = []
         seq = 0
@@ -1233,6 +1281,7 @@ class ComparativeConstitutionChunker:
                     prefer_pages_1based=prefer_pages,
                     lang_hint=lang_hint,
                     body_acc=para_acc if para_acc else None,
+                    page_height_map=page_height_map,  # ★ v4.1
                 )
                 bbox_info = anchored if anchored else _acc_to_boxes(para_acc)
             else:
@@ -1332,7 +1381,6 @@ class ComparativeConstitutionChunker:
             seq += 1
             current.update(_empty_current())
 
-        # 공통 구조 헤더 판별
         def _is_struct_header(text: str) -> Optional[str]:
             t = text.strip()
             if not t or _extract_article_no_safe(t):
@@ -1347,7 +1395,15 @@ class ComparativeConstitutionChunker:
         def _process_lines_single(lines_seq, lang_hint_default="KO"):
             for ln in lines_seq:
                 text = ln["text"]
+                cleaned = re.sub(r"법제처\s*\d*\s*(?:국가법령정보센터)?\s*", "", text).strip()
+                if not cleaned:
+                    continue  # 함수가 아닌 루프이므로 continue
+                if cleaned != text:
+                    ln = dict(ln, text=cleaned)
+                    text = cleaned
                 bbox = ln.get("bbox")
+                # ★ v4.1
+                ph = ln.get("page_height") or page_height_map.get(page_no, 0.0)
 
                 struct_level = _is_struct_header(text)
                 if struct_level:
@@ -1371,8 +1427,8 @@ class ComparativeConstitutionChunker:
                     current["display_path"] = _build_display_path(art, lh)
                     current["structure"] = {"article_number": art}
                     if bbox is not None:
-                        _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
-                        _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
+                        _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox, page_height=ph)  # ★ v4.1
+                        _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox, page_height=ph)  # ★ v4.1
                     remainder = _extract_body_after_article_no(text, art)
                     if remainder:
                         fake_ln = dict(ln, text=remainder)
@@ -1387,7 +1443,6 @@ class ComparativeConstitutionChunker:
                             current["page_english"] = current["page_english"] or page_no
                     continue
 
-                # 항 경계 감지
                 para_key: Optional[str] = None
                 cm = _RE_CIRCLED.search(text)
                 if cm:
@@ -1420,7 +1475,7 @@ class ComparativeConstitutionChunker:
                 current["page"] = current["page"] or page_no
 
                 if bbox is not None:
-                    _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
+                    _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox, page_height=ph)  # ★ v4.1
 
         for meta, lines, col_pair in kept:
             page_no = meta["page_no"]
@@ -1429,7 +1484,15 @@ class ComparativeConstitutionChunker:
                 # 1단
                 for ln in lines:
                     text = ln["text"]
+                    cleaned = re.sub(r"법제처\s*\d*\s*(?:국가법령정보센터)?\s*", "", text).strip()
+                    if not cleaned:
+                        continue  # 함수가 아닌 루프이므로 continue
+                    if cleaned != text:
+                        ln = dict(ln, text=cleaned)
+                        text = cleaned
                     bbox = ln.get("bbox")
+                    # ★ v4.1: page_height 조회
+                    ph = ln.get("page_height") or page_height_map.get(page_no, 0.0)
 
                     struct_level = _is_struct_header(text)
                     if struct_level:
@@ -1452,8 +1515,8 @@ class ComparativeConstitutionChunker:
                         current["display_path"] = _build_display_path(art, lang_hint_ln)
                         current["structure"] = {"article_number": art}
                         if bbox is not None:
-                            _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox)
-                            _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
+                            _accum_bbox(article_bbox_acc, page_no=page_no, bbox=bbox, page_height=ph)  # ★ v4.1
+                            _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox, page_height=ph)  # ★ v4.1
                         remainder = _extract_body_after_article_no(text, art)
                         if remainder:
                             fake_ln = dict(ln, text=remainder)
@@ -1508,7 +1571,7 @@ class ComparativeConstitutionChunker:
                         current["page"] = page_no
 
                     if bbox is not None:
-                        _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox)
+                        _accum_bbox(current["para_bbox_acc"], page_no=page_no, bbox=bbox, page_height=ph)  # ★ v4.1
 
             else:
                 # 2단
@@ -1540,7 +1603,6 @@ class ComparativeConstitutionChunker:
         flush()
         doc.close()
 
-        # 후처리
         cleaned: List[ConstitutionChunk] = []
         for ch in chunks:
             body = (ch.korean_text or "") + "\n" + (ch.english_text or "")
@@ -1570,7 +1632,7 @@ class ComparativeConstitutionChunker:
             merged.append(ch)
 
         layout_label = "2단" if is_two_column else "1단"
-        print(f"[Chunker] v4.0 {layout_label} 항 단위 청크 {len(merged)}개 생성")
+        print(f"[Chunker] v4.1 {layout_label} 항 단위 청크 {len(merged)}개 생성")
         return merged
 
 
@@ -1596,27 +1658,14 @@ def chunk_constitution_document(
     is_bilingual: bool = False,
     include_merged_article_chunks: bool = False,  # 하위 호환용, 무시됨
     auto_detect_columns: bool = True,
-    # ★ v4.0: 청크 단위 ("article" | "paragraph")
-    # 미지정 시 환경변수 CONSTITUTION_CHUNK_GRANULARITY → "paragraph"
     chunk_granularity: Optional[str] = None,
 ) -> List[ConstitutionChunk]:
     """
-    헌법 문서 청킹 메인 함수 (v4.0)
+    헌법 문서 청킹 메인 함수 (v4.1)
 
-    파라미터:
-        chunk_granularity: "article" | "paragraph"
-            - "article"  : 조(條) 단위. 항을 하나로 합쳐 조 단위 청크 생성.
-                           검색 recall 향상, 특히 단문 조항 누락 방지.
-                           bbox_info = article_bbox_info = 조 전체 bbox.
-            - "paragraph": 항(項) 단위 (기존 v3.x 동작, 기본값).
-                           bbox_info = 해당 항 bbox, article_bbox_info = 조 전체 bbox.
-
-        auto_detect_columns: True(기본) → 1단/2단 자동 감지.
-
-    청크 구조:
-        bbox_info         = 항(또는 조) bbox  (강조 하이라이팅)
-        article_bbox_info = 조 전체 bbox      (배경 하이라이팅)
-        structure         = { article_number, paragraph(항 단위일 때만), 편/장/절 컨텍스트 }
+    v4.1 변경: bbox 페이지 경계 clamp 적용.
+    다음 페이지로 넘어가는 청크의 두 번째 페이지 bbox가
+    페이지 전체(y0≈57, y1≈816)로 잡히는 문제가 해결됩니다.
     """
     resolved_granularity = chunk_granularity or os.getenv(
         "CONSTITUTION_CHUNK_GRANULARITY", "paragraph"

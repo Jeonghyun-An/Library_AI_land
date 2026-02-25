@@ -24,7 +24,9 @@
           <div class="tab_con_wrap">
             <!-- [S] 질의 히스토리 -->
             <div class="tab_history tab_con on">
-              <div class="con_tit ty_01 mt_20i">질의 히스토리</div>
+              <div class="con_tit ty_01 mt_20i text-slate-700 mt-2 text-sm">
+                질의 히스토리
+              </div>
               <div class="history_con_wrap history_con_wrap--scrollable">
                 <div class="history_con">
                   <!-- 동적 히스토리 -->

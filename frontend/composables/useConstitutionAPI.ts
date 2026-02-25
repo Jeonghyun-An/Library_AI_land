@@ -88,7 +88,7 @@ export const useConstitutionAPI = () => {
             korean_item: params.korean_item,
             foreign_by_country: params.foreign_by_country,
             pair_id: params.pair_id,
-            max_tokens: params.max_tokens ?? 320,
+            max_tokens: params.max_tokens ?? 1500,
             temperature: params.temperature ?? 0.3,
           },
         },
@@ -116,7 +116,7 @@ export const useConstitutionAPI = () => {
           korean_items: params.korean_items,
           foreign_country: params.foreign_country,
           foreign_items: params.foreign_items,
-          max_tokens: params.max_tokens ?? 800,
+          max_tokens: params.max_tokens ?? 1500,
           temperature: params.temperature ?? 0.3,
         },
       });

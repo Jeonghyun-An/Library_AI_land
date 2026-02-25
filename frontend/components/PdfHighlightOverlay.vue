@@ -1,10 +1,16 @@
 <!-- frontend/components/PdfHighlightOverlay.vue -->
 <!--
-  PDF.js iframe 위에 bbox 하이라이트를 표시하는 오버레이 컴포넌트 (v3.10)
+  PDF.js iframe 위에 bbox 하이라이트를 표시하는 오버레이 컴포넌트 (v4.1)
 
   2중 레이어:
     Layer 1 (article): article_bbox_info → 조 전체 영역, 연한 노란 배경
     Layer 2 (para):    bbox_info         → 해당 항 영역, 진한 주황 강조
+
+  v4.1 변경사항:
+    - toRect()에 bboxListLength / bboxIndexInList 파라미터 추가
+    - bboxToOverlayRect()의 continuation bbox clamp(usePdfJsOverlay v4.1) 활성화
+    - 다음 페이지로 넘어가는 청크의 두 번째 페이지 bbox가 페이지 전체로
+      하이라이팅되는 문제 해결
 
   v3.10 변경사항:
     - displayScore prop 제거 (잘못된 Float16Array 타입, idx 오탐 버그)
@@ -209,7 +215,13 @@ const highlightData = computed(() => {
     .filter((d) => d.paraBoxes.length > 0 || d.articleBoxes.length > 0);
 });
 
-/** 공통 rect 변환 — displayScore를 rect에 포함 */
+/**
+ * 공통 rect 변환 — displayScore를 rect에 포함
+ *
+ * ★ v4.1: bboxListLength / bboxIndexInList 추가
+ *   - usePdfJsOverlay.bboxToOverlayRect()의 continuation bbox clamp 활성화
+ *   - 두 번째 이후 페이지 bbox의 비정상적 높이를 프론트에서도 방어
+ */
 function toRect(
   bbox: any,
   meta: {
@@ -219,15 +231,22 @@ function toRect(
     articleLabel: string;
     resultIndex: number;
   },
+  bboxListLength: number, // ★ v4.1
+  bboxIndexInList: number, // ★ v4.1
   extra?: Record<string, any>,
 ): (OverlayRect & Record<string, any>) | null {
   const _t = updateTrigger.value;
-  const rect = bboxToOverlayRect(bbox, {
-    score: meta.score,
-    text: meta.text,
-    articleLabel: meta.articleLabel,
-    resultIndex: meta.resultIndex,
-  });
+  const rect = bboxToOverlayRect(
+    bbox,
+    {
+      score: meta.score,
+      text: meta.text,
+      articleLabel: meta.articleLabel,
+      resultIndex: meta.resultIndex,
+    },
+    bboxListLength, // ★ v4.1
+    bboxIndexInList, // ★ v4.1
+  );
   if (!rect) return null;
   rect.left += iframeOffsetX.value;
   rect.top += iframeOffsetY.value;
@@ -252,15 +271,22 @@ const articleRects = computed(() => {
   if (!iframeReady.value) return [];
   const rects: any[] = [];
   for (const d of highlightData.value) {
-    for (const bbox of d.articleBoxes) {
+    const listLen = d.articleBoxes.length; // ★ v4.1
+    for (let i = 0; i < listLen; i++) {
+      const bbox = d.articleBoxes[i];
       if (!renderPages.value.has(bbox.page)) continue;
-      const r = toRect(bbox, {
-        score: d.score,
-        displayScore: d.displayScore,
-        text: d.displayText,
-        articleLabel: d.articleLabel,
-        resultIndex: d.resultIndex,
-      });
+      const r = toRect(
+        bbox,
+        {
+          score: d.score,
+          displayScore: d.displayScore,
+          text: d.displayText,
+          articleLabel: d.articleLabel,
+          resultIndex: d.resultIndex,
+        },
+        listLen, // ★ v4.1
+        i, // ★ v4.1
+      );
       if (r) rects.push(r);
     }
   }
@@ -273,7 +299,9 @@ const paragraphRects = computed(() => {
   if (!iframeReady.value) return [];
   const rects: any[] = [];
   for (const d of highlightData.value) {
-    for (const bbox of d.paraBoxes) {
+    const listLen = d.paraBoxes.length; // ★ v4.1
+    for (let i = 0; i < listLen; i++) {
+      const bbox = d.paraBoxes[i];
       if (!renderPages.value.has(bbox.page)) continue;
       const r = toRect(
         bbox,
@@ -284,6 +312,8 @@ const paragraphRects = computed(() => {
           articleLabel: d.articleLabel,
           resultIndex: d.resultIndex,
         },
+        listLen, // ★ v4.1
+        i, // ★ v4.1
         { isParagraphLevel: d.isParagraphLevel },
       );
       if (r) rects.push(r);

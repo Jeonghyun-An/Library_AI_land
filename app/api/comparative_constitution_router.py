@@ -147,7 +147,7 @@ class ConstitutionUploadRequest(BaseModel):
 
 class ComparativeSearchRequest(BaseModel):
     query: str
-    korean_top_k: int = 3
+    korean_top_k: int = 5
     korean_score_threshold: float = 0.2
     foreign_per_country: int = 3   # 국가당 처음 보여줄 조항 수
     foreign_pool_size: int = 50    # 국가별 후보 풀
@@ -192,7 +192,7 @@ class ComparativeSummaryRequest(BaseModel):
     foreign_by_country: Dict[str, PairSummaryCountryPack] = Field(default_factory=dict)
 
     pair_id: Optional[str] = Field(None, description="캐시 키로 쓸 pair_id (옵션)")
-    max_tokens: int = Field(1000, ge=100, le=2000)
+    max_tokens: int = Field(1500, ge=100, le=4000)
     temperature: float = Field(0.3, ge=0.0, le=1.5)
 
 
@@ -212,7 +212,7 @@ class CountrySummaryRequest(BaseModel):
     korean_items: List[ConstitutionArticleResult] = Field(..., description="한국 헌법 조항 리스트")
     foreign_country: str = Field(..., description="비교할 국가 코드 (예: AE, US)")
     foreign_items: List[ConstitutionArticleResult] = Field(..., description="외국 헌법 조항 리스트")
-    max_tokens: int = Field(1000, ge=100, le=2000)
+    max_tokens: int = Field(1500, ge=100, le=4000)
     temperature: float = Field(0.3, ge=0.0, le=1.5)
 
 
@@ -1697,8 +1697,8 @@ async def comparative_search(request: ComparativeSearchRequest):
         query=request.query,
         collection=collection,
         embedding_model=emb_model,
-        top_k=max(1, request.korean_top_k*2),
-        initial_retrieve=100,
+        top_k=max(request.korean_top_k * 3, 15),  # 후처리에서 필터링할 예정이므로 여유 있게
+        initial_retrieve=150,
         country_filter="KR",
         use_reranker=True,
         score_threshold=0.0,
@@ -1730,7 +1730,7 @@ async def comparative_search(request: ComparativeSearchRequest):
             
             # 점수 3가지
             raw_score=float(item.get('raw_score', 0.0)),
-            score=float(item.get('score', 0.0)),
+            score=float(item.get('score', item.get('display_score', 0.0))),
             display_score=float(item.get('display_score', 0.0)),
             
             page=int(meta.get('page', 1) or 1),
@@ -1740,7 +1740,7 @@ async def comparative_search(request: ComparativeSearchRequest):
             continent=get_continent(meta.get('country', 'KR'))
         )
         korean_results.append(result)
-    KOREAN_SCORE_THRESHOLD = float(os.getenv("KOREAN_SCORE_THRESHOLD", "0.2"))
+    KOREAN_SCORE_THRESHOLD = float(os.getenv("KOREAN_SCORE_THRESHOLD", "0.05"))
         
         # score 기준으로 정렬 (높은 순)
     korean_results = sorted(korean_results, key=lambda x: x.score, reverse=True)
@@ -1753,7 +1753,7 @@ async def comparative_search(request: ComparativeSearchRequest):
     
     # 필터링 결과가 0개면 최소 1개는 보장
     if not filtered_korean and korean_results:
-        filtered_korean = korean_results[:1]
+        filtered_korean = korean_results[:3]
         print(f"[KOREAN_FILTER] 모든 조항이 threshold({KOREAN_SCORE_THRESHOLD}) 미만 - 최고점만 유지: {filtered_korean[0].display_path} (score: {filtered_korean[0].score:.3f})")
     else:
         removed_count = len(korean_results) - len(filtered_korean)

@@ -1,4 +1,19 @@
 // frontend/composables/usePdfJsOverlay.ts
+/**
+ * v4.1 변경사항:
+ * ─────────────────────────────────────────────────────────────
+ * [버그픽스] 다음 페이지로 넘어가는 청크의 두 번째 페이지 bbox가
+ *           페이지 전체(y0≈57, y1≈816)로 하이라이팅되는 문제 방어.
+ *
+ * bboxToOverlayRect() 내부에 "continuation page bbox" 감지 로직 추가:
+ *   - bbox 목록에서 해당 bbox가 첫 번째가 아닌 경우(continuation page)
+ *   - AND 해당 페이지의 height 비율(hRatio)이 CONTINUATION_MAX_H_RATIO 초과
+ *   → y1을 페이지 하단 여백(FOOTER_MARGIN_RATIO) 기준으로 clamp
+ *
+ * 이 처리는 백엔드(v4.1 chunker)의 bbox clamp와 함께 동작하는 이중 방어선입니다.
+ * 백엔드가 이미 올바른 y1을 내려보내면 이 로직은 아무런 영향을 미치지 않습니다.
+ * ─────────────────────────────────────────────────────────────
+ */
 import { ref, onBeforeUnmount } from "vue";
 
 export interface PdfJsPageInfo {
@@ -31,6 +46,21 @@ type BBox = {
   y1: number;
   text?: string;
 };
+
+// ★ v4.1: continuation bbox 방어 상수
+/**
+ * continuation 페이지의 bbox height 비율이 이 값을 초과하면
+ * 페이지 전체를 덮는 비정상 bbox로 간주하여 y1을 clamp한다.
+ * (예: 0.80 → 페이지 높이의 80% 초과 시 clamp)
+ */
+const CONTINUATION_MAX_H_RATIO = 0.8;
+
+/**
+ * continuation bbox의 y1을 clamp할 때 사용하는 하단 여백 비율.
+ * page_height * (1 - FOOTER_MARGIN_RATIO) 가 clamp 상한선.
+ * (예: 0.06 → 페이지 하단 6% 여백 제외)
+ */
+const FOOTER_MARGIN_RATIO = 0.06;
 
 export const usePdfJsOverlay = () => {
   const iframeReady = ref(false);
@@ -273,6 +303,43 @@ export const usePdfJsOverlay = () => {
     return { ...b, x0, y0, x1, y1 };
   }
 
+  /**
+   * ★ v4.1: continuation bbox 방어 clamp
+   *
+   * 청크가 두 페이지에 걸칠 때, 두 번째(continuation) 페이지의 bbox가
+   * 페이지 전체를 커버하는 경우(백엔드 clamp 미적용 구 데이터 포함)를 감지하여
+   * y1을 페이지 콘텐츠 하단으로 제한한다.
+   *
+   * @param b         - 현재 처리 중인 bbox (normalizeAndClampBBox 적용 후)
+   * @param vh        - 페이지 viewport 높이 (pt 단위)
+   * @param isContinuation - 이 bbox가 청크의 첫 번째 페이지가 아닌지 여부
+   * @returns clamp된 BBox 또는 원본 그대로
+   */
+  function clampContinuationBBox(
+    b: BBox,
+    vh: number,
+    isContinuation: boolean,
+  ): BBox {
+    if (!isContinuation) return b;
+
+    const hRatio = (b.y1 - b.y0) / vh;
+    if (hRatio <= CONTINUATION_MAX_H_RATIO) return b;
+
+    // 비정상적으로 큰 bbox → y1을 페이지 하단 여백 기준으로 clamp
+    const clampedY1 = vh * (1 - FOOTER_MARGIN_RATIO);
+    if (clampedY1 <= b.y0) return b; // clamp 후 높이가 0이 되면 원본 유지
+
+    return { ...b, y1: clampedY1 };
+  }
+
+  /**
+   * BBox → OverlayRect 변환
+   *
+   * @param bbox              - 변환할 bbox
+   * @param meta              - 점수/텍스트 등 메타
+   * @param bboxListLength    - ★ v4.1: 이 청크의 bbox 리스트 전체 개수
+   * @param bboxIndexInList   - ★ v4.1: 이 bbox가 리스트에서 몇 번째인지 (0-based)
+   */
   const bboxToOverlayRect = (
     bbox: BBox,
     meta: {
@@ -281,6 +348,8 @@ export const usePdfJsOverlay = () => {
       articleLabel: string;
       resultIndex: number;
     },
+    bboxListLength: number = 1, // ★ v4.1
+    bboxIndexInList: number = 0, // ★ v4.1
   ): OverlayRect | null => {
     const pageNumber =
       typeof bbox.page === "number" && bbox.page > 0
@@ -297,8 +366,13 @@ export const usePdfJsOverlay = () => {
     const vh = pageInfo.viewportHeight;
 
     // 1) bbox 정규화 + 클램프
-    const nb = normalizeAndClampBBox(bbox, vw, vh);
+    let nb = normalizeAndClampBBox(bbox, vw, vh);
     if (!nb) return null;
+
+    // ★ v4.1: continuation 페이지 방어 clamp
+    // 청크의 bbox 리스트에서 두 번째 이후 bbox는 continuation page로 간주
+    const isContinuation = bboxListLength > 1 && bboxIndexInList > 0;
+    nb = clampContinuationBBox(nb, vh, isContinuation);
 
     // 2) full-page 박스 필터링 (99% 이상만 제거 — 사실상 실제 full-page만)
     const wRatio = (nb.x1 - nb.x0) / vw;
