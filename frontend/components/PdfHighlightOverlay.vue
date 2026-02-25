@@ -21,7 +21,7 @@
       class="pdf_overlay_layer"
     >
       <!-- Layer 1: 조 전체 배경 (연한 노란) -->
-      <div
+      <!-- <div
         v-for="(rect, idx) in articleRects"
         :key="`art-${rect.resultIndex}-${rect.pageNumber}-${idx}`"
         :style="{
@@ -36,7 +36,7 @@
           { pdf_overlay_rect_active: rect.resultIndex === activeResultIndex },
         ]"
         @click.stop="onRectClick(rect)"
-      />
+      /> -->
 
       <!-- Layer 2: 항 강조 (진한 주황) + 툴팁 -->
       <div

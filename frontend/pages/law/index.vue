@@ -1246,6 +1246,7 @@ const countrySummaryHtml = computed(() => {
 
   const withBreaks = s
     .replace(/\)\.(\s*)(?!\n|<br>)/g, ").\n") // ). 뒤에 줄바꿈
+    .replace(/\)(?!\s*$)/g, ")\n") // ) 뒤에 줄바꿈 (줄 끝 제외)
     .replace(/\n/g, "<br>");
 
   return withBreaks;
@@ -2131,7 +2132,37 @@ onBeforeUnmount(() => {
   color: #9ca3af;
   font-size: 0.8rem;
 }
+/* ===== 검색 전 화면 전체 높이 확보 ===== */
+.search_main_wrap {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
 
+/* 헤더 아래 메인 영역이 화면을 꽉 채우게 */
+.search_main_wrap .search_main {
+  flex: 1;
+  display: flex;
+  align-items: center; /* 세로 중앙 느낌 */
+  justify-content: center; /* 가로 중앙 느낌 */
+  padding: 60px 0; /* 납작해 보이면 여기를 늘려도 됨 */
+}
+
+/* 내부 콘텐츠가 너무 눌리지 않게 */
+.search_main_wrap .search_main .inner {
+  width: 100%;
+  max-width: 960px; /* 필요시 */
+  padding: 0 20px;
+}
+
+.search_main_wrap .search_main .inner {
+  text-align: center;
+}
+
+.search_main_wrap .search_main .inner > img {
+  display: block;
+  margin: 0 auto;
+}
 /* ==================== 반응형 (모바일) ==================== */
 @media (max-width: 1024px) {
   .pdf_view_container {
