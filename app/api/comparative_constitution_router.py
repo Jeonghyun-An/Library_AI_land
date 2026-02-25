@@ -142,6 +142,7 @@ class ConstitutionUploadRequest(BaseModel):
     country: str = Field(..., description="국가 코드 (KR | GH | NG | ZA)")
     version: Optional[str] = Field(None, description="버전/개정일")
     is_bilingual: bool = Field(False, description="이중언어 여부")
+    chunk_granularity: str = "article"
 
 
 class ComparativeSearchRequest(BaseModel):
@@ -191,7 +192,7 @@ class ComparativeSummaryRequest(BaseModel):
     foreign_by_country: Dict[str, PairSummaryCountryPack] = Field(default_factory=dict)
 
     pair_id: Optional[str] = Field(None, description="캐시 키로 쓸 pair_id (옵션)")
-    max_tokens: int = Field(320, ge=50, le=800)
+    max_tokens: int = Field(1000, ge=100, le=2000)
     temperature: float = Field(0.3, ge=0.0, le=1.5)
 
 
@@ -211,7 +212,7 @@ class CountrySummaryRequest(BaseModel):
     korean_items: List[ConstitutionArticleResult] = Field(..., description="한국 헌법 조항 리스트")
     foreign_country: str = Field(..., description="비교할 국가 코드 (예: AE, US)")
     foreign_items: List[ConstitutionArticleResult] = Field(..., description="외국 헌법 조항 리스트")
-    max_tokens: int = Field(800, ge=100, le=2000)
+    max_tokens: int = Field(1000, ge=100, le=2000)
     temperature: float = Field(0.3, ge=0.0, le=1.5)
 
 
@@ -434,7 +435,8 @@ async def batch_upload_constitutions(
                     title,
                     version,
                     False,  # is_bilingual
-                    minio_key
+                    minio_key,
+                    "article",
                 )
             
             results.append({
@@ -476,6 +478,7 @@ async def upload_constitution(
     version: Optional[str] = Form(None),
     is_bilingual: bool = Form(False),
     replace_existing: bool = Form(True, description="기존 문서 자동 삭제 여부"),
+    chunk_granularity: str = Form("article",description="청크 단위: article(조) | paragraph(항)"),
     background_tasks: BackgroundTasks = None
 ):
     """
@@ -602,7 +605,8 @@ async def upload_constitution(
                 title,
                 version,
                 is_bilingual,
-                minio_key
+                minio_key,
+                chunk_granularity,
             )
             
             return {
@@ -749,7 +753,8 @@ async def _index_constitution_background(
     title: str,
     version: Optional[str],
     is_bilingual: bool,
-    minio_key: str
+    minio_key: str,
+    chunk_granularity: str = "article"
 ):
     """
     헌법 인덱싱 백그라운드 작업
@@ -826,7 +831,8 @@ async def _index_constitution_background(
             country=country,
             constitution_title=title,
             version=version,
-            is_bilingual=is_bilingual
+            is_bilingual=is_bilingual,
+            chunk_granularity=chunk_granularity,
         )
 
         print(f"[CONSTITUTION] Generated {len(chunks)} chunks")
@@ -870,7 +876,7 @@ async def _index_constitution_background(
         emb_model = get_embedding_model()
 
         # search_text도 너무 길면 미리 잘라서 임베딩/저장 안정화
-        search_texts = [_truncate(chunk.search_text or "") for chunk in chunks]
+        search_texts = [chunk.search_text or "" for chunk in chunks]
 
         embeddings = emb_model.encode(
             search_texts,
@@ -898,14 +904,28 @@ async def _index_constitution_background(
 
         # VARCHAR 제한 대응
         chunk_texts = [
-            _truncate(chunk.korean_text or chunk.english_text or "")
+            _truncate(chunk.search_text or chunk.korean_text or chunk.english_text or "")
             for chunk in chunks
         ]
 
         embeddings_list = embeddings.tolist()
 
         # JSON 필드 타입 대응: dict 그대로, json.dumps 금지
-        metadatas = [_json_safe(chunk.to_dict()) for chunk in chunks]
+        # 수정 후 — metadata의 텍스트 필드는 원문 보존, JSON 전체 크기만 체크
+        MILVUS_JSON_MAX = int(os.getenv("MILVUS_JSON_MAX_BYTES", "65536"))
+        MILVUS_TEXT_MAX = int(os.getenv("MILVUS_TEXT_MAX_CHARS", "16000"))  # JSON 내 텍스트 필드 상한
+        
+        def _build_meta(chunk) -> dict:
+            d = _json_safe(chunk.to_dict())
+            # 텍스트 필드는 원문 보존 (truncate 금지) — 단 JSON 크기 초과 방지용 상한만
+            for key in ("korean_text", "english_text", "search_text"):
+                v = d.get(key)
+                if v and len(v) > MILVUS_TEXT_MAX:
+                    print(f"[WARNING] {chunk.doc_id} {key} 길이 {len(v)} 초과 → {MILVUS_TEXT_MAX}자로 제한")
+                    d[key] = v[:MILVUS_TEXT_MAX]
+            return d
+        
+        metadatas = [_build_meta(chunk) for chunk in chunks]
 
         # ===== 메타데이터 강화 =====
         now_iso = datetime.utcnow().isoformat()
@@ -1991,7 +2011,7 @@ async def _call_vllm_completion(prompt: str, max_tokens: int, temperature: float
     vllm_url = os.getenv("VLLM_BASE_URL", "http://vllm-a4000:8000")
     model_name = os.getenv("VLLM_MODEL_FOR_SUMMARY", "gemma-3-4b-it")
 
-    async with httpx.AsyncClient(timeout=40.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             f"{vllm_url}/v1/completions",
             json={
@@ -2985,6 +3005,10 @@ def debug_milvus_peek(limit: int = 100):
                     "page": meta.get("page"),
                     "seq": meta.get("seq"),
                     "doc_id": meta.get("doc_id"),
+                    "bbox": meta.get("bbox_info"),
+                    "bbox2": meta.get("article_bbox_info"),
+                    
+                    
                 }
             })
         
