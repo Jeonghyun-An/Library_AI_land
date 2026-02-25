@@ -12,8 +12,8 @@
       <div class="left_menu_hd">
         <a href="#;" class="hd_logo view_ctr" @click.prevent="resetHome">
           <img
-            src="/img/layout/hd_logo.svg"
-            alt="법원도서관 AI 헌법 특화 에이전트"
+            src="/img/layout/cc_logo.png"
+            alt="헌법재판소도서관 AI 헌법 특화 에이전트"
           />
         </a>
         <a href="#;" class="left_menu_trigger" aria-label="메뉴 열기"></a>
@@ -138,8 +138,8 @@
       <div class="search_wrap_hd">
         <div class="area">
           <img
-            src="/img/layout/hd_logo.svg"
-            alt="법원도서관 AI 헌법 특화 에이전트"
+            src="/img/layout/cc_logo.png"
+            alt="헌법재판소도서관 AI 헌법 특화 에이전트"
             class="hd_logo"
           />
         </div>
@@ -1245,8 +1245,8 @@ const countrySummaryHtml = computed(() => {
   if (!s) return "";
 
   const withBreaks = s
-    .replace(/\)\.(\s*)(?!\n|<br>)/g, ").\n") // ). 뒤에 줄바꿈
-    .replace(/\)(?!\s*$)/g, ")\n") // ) 뒤에 줄바꿈 (줄 끝 제외)
+    .replace(/\)\.(\s*)(?!\n|<br>)/g, ").\n") // ). 뒤 줄바꿈 (먼저)
+    .replace(/\)(?!\.|[\s]*$)/g, ")\n") // ) 뒤 줄바꿈 단, ). 는 제외
     .replace(/\n/g, "<br>");
 
   return withBreaks;
