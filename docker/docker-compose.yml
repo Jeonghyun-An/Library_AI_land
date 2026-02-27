@@ -1,15 +1,10 @@
-# docker/docker-compose.yml
-# 도서관 지식검색 RAG 시스템 (Mock → Linux(H200) 이관 고려)
-# - external volume/network 사용
-# - MinIO bucket 자동 생성(minio-init)
-# - Milvus healthcheck 완화
+version: "3.9"
 
 x-ragnet-network: &ragnet
   networks:
     - library-ragnet
 
 services:
-  # ========== 메타데이터 저장소 (etcd) ==========
   etcd:
     image: quay.io/coreos/etcd:v3.5.0
     container_name: library-etcd
@@ -45,7 +40,6 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # ========== 객체 저장소 (MinIO) ==========
   minio:
     image: minio/minio:latest
     container_name: library-minio
@@ -56,8 +50,8 @@ services:
     volumes:
       - library_minio_data:/data
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "19000:9000"
+      - "19001:9001"
     <<: *ragnet
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
@@ -67,8 +61,6 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # ========== MinIO Bucket Init (library-bucket 자동 생성) ==========
-  # - Milvus가 버킷 없어서 내부 컴포넌트(DataCoord) 꼬이는 걸 방지
   minio-init:
     image: minio/mc:latest
     container_name: library-minio-init
@@ -90,7 +82,6 @@ services:
       "
     restart: "no"
 
-  # ========== 벡터 데이터베이스 (Milvus) ==========
   milvus:
     image: milvusdb/milvus:v2.2.11
     container_name: library-milvus
@@ -120,73 +111,69 @@ services:
       start_period: 300s
     restart: unless-stopped
 
-  # ========== LLM 서버 (vLLM - A4000 최적화) ==========
-  vllm-a4000:
-    image: vllm/vllm-openai:latest
+  vllm:
+    image: vllm/vllm-openai:latest-cu130
     container_name: library-vllm
+    <<: *ragnet
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    <<: *ragnet
+              count: all # ← H200 전체 인식
+              capabilities: ["gpu"]
+    shm_size: "32g" # ← 32B 모델은 16g로 부족할 수 있음
     environment:
       HUGGINGFACE_HUB_TOKEN: ${HUGGINGFACE_TOKEN}
       HF_TOKEN: ${HUGGINGFACE_TOKEN}
       HF_HOME: "/models"
       CUDA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: "0"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
       TRANSFORMERS_OFFLINE: "0"
-      VLLM_USE_FLASHINFER: "0"
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn" # ← H200 multi-GPU 안정성
     volumes:
-      - ../models/.hf-cache:/models:rw
+      - /data/models/.hf-cache:/models:rw
     command:
-      - --model
-      - google/gemma-3-4b-it
+      - google/gemma-3-12b-it
       - --served-model-name
-      - gemma-3-4b-it
+      - gemma-3-12b
       - --download-dir
       - /models
       - --max-model-len
-      - "4096"
+      - "16384"
       - --dtype
       - bfloat16
       - --gpu-memory-utilization
-      - "0.70"
+      - "0.35"
       - --max-num-seqs
-      - "4"
-      - --port
-      - "8000"
+      - "4" # ← 여유있게
       - --host
       - "0.0.0.0"
+      - --port
+      - "8000"
+      # enforce-eager 제거 → H200은 FlashAttention2 지원하므로 오히려 느려짐
     ports:
       - "18080:8000"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/v1/models"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 60s
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 40 # ← 32B 모델 로딩 시간 고려 (retries × interval = 최대 20분)
+      start_period: 600s # ← 10분 유예 (다운로드 포함 시 더 늘려야 함)
     restart: unless-stopped
 
-  # ========== FastAPI 백엔드 ==========
   fastapi:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    image: landsoftdocker/library-fastapi:latest
     container_name: library-fastapi
+    <<: *ragnet
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    volumes:
-      - ..:/app
-      - ../models/.hf-cache:/models
-    <<: *ragnet
+              count: all # ← gpus: all 대신 이걸로 통일
+              capabilities: ["gpu"]
     environment:
       IS_DOCKER: "true"
       PYTHONUNBUFFERED: "1"
@@ -201,11 +188,9 @@ services:
       MILVUS_HOST: "milvus"
       MILVUS_PORT: "19530"
       MILVUS_COLLECTION: "library_books"
-      MILVUS_CONNECT_TIMEOUT: "60"
-      MILVUS_CONNECT_RETRIES: "10"
-      MILVUS_CONNECT_BACKOFF: "1.0"
 
-      VLLM_BASE_URL: "http://vllm-a4000:8000"
+      VLLM_BASE_URL: "http://vllm:8000"
+      VLLM_MODEL_FOR_SUMMARY: "gemma-3-12b"
 
       RAG_TARGET_TOKENS: "512"
       RAG_OVERLAP_TOKENS: "64"
@@ -227,14 +212,14 @@ services:
       RAG_HYBRID_WEIGHT_SPARSE: "0.3"
       RAG_HYBRID_WEIGHT_KEYWORD: "0.2"
     depends_on:
-      vllm-a4000:
-        condition: service_healthy
       milvus:
         condition: service_healthy
       minio:
         condition: service_healthy
+      # vllm:
+      # condition: service_healthy    # service_healthy는 vllm 뜨기 전에 fastapi 죽을 수 있음
     ports:
-      - "8000:8000"
+      - "18000:8000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 10s
@@ -243,47 +228,40 @@ services:
       start_period: 60s
     restart: unless-stopped
 
-  # ========== Nuxt.js 프론트엔드 ==========
   nuxt:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.nuxt
+    image: landsoftdocker/library-nuxt:latest
     container_name: library-nuxt
+    <<: *ragnet
     environment:
       NUXT_PUBLIC_API_BASE: "/api"
       NITRO_HOST: "0.0.0.0"
       NITRO_PORT: "3000"
       PORT: "3000"
-    <<: *ragnet
     depends_on:
       fastapi:
         condition: service_healthy
     restart: unless-stopped
 
-  # ========== Nginx 게이트웨이 ==========
   gateway:
     image: nginx:alpine
     container_name: library-gateway
+    <<: *ragnet
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - /data/library-rag/runtime/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /data/library-rag/runtime/nginx/conf.d:/etc/nginx/conf.d:ro
     ports:
       - "90:80"
-    <<: *ragnet
     depends_on:
-      nuxt:
-        condition: service_started
-      fastapi:
-        condition: service_healthy
+      - nuxt
+      - fastapi
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/health"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 20s
     restart: unless-stopped
 
-# ========== 볼륨 정의 (External) ==========
 volumes:
   library_etcd_data:
     external: true
@@ -295,7 +273,6 @@ volumes:
     external: true
     name: library_minio_data
 
-# ========== 네트워크 정의 (External) ==========
 networks:
   library-ragnet:
     external: true
