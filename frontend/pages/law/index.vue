@@ -12,7 +12,7 @@
       <div class="left_menu_hd">
         <a href="#;" class="hd_logo view_ctr" @click.prevent="resetHome">
           <img
-            src="/img/layout/cc_logo.png"
+            src="/img/layout/cc_logo4.png"
             alt="헌법재판소도서관 AI 헌법 특화 에이전트"
           />
         </a>
@@ -140,7 +140,7 @@
       <div class="search_wrap_hd">
         <div class="area">
           <img
-            src="/img/layout/cc_logo.png"
+            src="/img/layout/cc_logo4.png"
             alt="헌법재판소도서관 AI 헌법 특화 에이전트"
             class="hd_logo"
           />
@@ -313,7 +313,8 @@
                   "
                 >
                   <div class="item ellipsis line02">
-                    주요 국가 헌법 '표현의 자유' 조항 비교 해줘.
+                    국무위원(장관)에 대한 '해임건의안'과 '탄핵소추안'의 법적
+                    구속력과 절차상 차이는 무엇인가요?
                   </div>
                   <div class="arr"></div>
                 </a>
@@ -323,7 +324,8 @@
                   href="#;"
                   class="inn"
                   @click.prevent="
-                    searchQuery = '주요 국가 헌법 비상사태 조항 비교 해줘.';
+                    searchQuery =
+                      '국무위원(장관)에 대한 \'해임건의안\'과 \'탄핵소추안\'의 법적 구속력과 절차상 차이는 무엇인가요?';
                     handleSearch();
                   "
                 >
@@ -626,7 +628,7 @@
                       <iframe
                         v-if="koreanPdfUrl"
                         id="korean-pdf-viewer"
-                        :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(koreanPdfUrl)}#page=${koreanPdfPage}`"
+                        :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(koreanPdfUrl)}#page=${koreanPdfPage}#sidebarView=none`"
                         class="pdf_iframe"
                         frameborder="0"
                       ></iframe>
@@ -2164,6 +2166,54 @@ onBeforeUnmount(() => {
 .search_main_wrap .search_main .inner > img {
   display: block;
   margin: 0 auto;
+}
+.search_wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100vh; /* 뷰포트 전체 높이 고정 */
+  overflow: hidden; /* 자식이 넘치지 않도록 */
+}
+
+.search_wrap_hd {
+  flex-shrink: 0; /* 헤더 고정 */
+}
+
+.search_list_wrap {
+  flex: 1; /* 남은 공간 전부 차지 */
+  overflow-y: auto; /* ← 핵심: 세로 스크롤 활성화 */
+  overflow-x: hidden;
+  min-height: 0; /* flex 자식의 overflow가 동작하려면 필요 */
+}
+
+/* 스크롤바 스타일 통일 */
+.search_list_wrap::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.search_list_wrap::-webkit-scrollbar-track {
+  background: transparent;
+}
+.search_list_wrap::-webkit-scrollbar-thumb {
+  background: #f7f7f7;
+  border-radius: 3px;
+}
+.search_list_wrap::-webkit-scrollbar-thumb:hover {
+  background: #d4d4d8;
+}
+.line-clamp-1 {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 /* ==================== 반응형 (모바일) ==================== */
 @media (max-width: 1024px) {
