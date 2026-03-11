@@ -15,33 +15,148 @@
 - **챕터/섹션 구조 보존으로 맥락 유지**
 - **A4000 16GB GPU 최적화**
 
+## 프로젝트 구현 결과(RAG 상위 구현 시스템)
+
+Dense + Sparse + Keyword Hybrid Search
+
+RRF Fusion
+
+Reranker
+
+article_number exact search
+
+score normalization
+
+Milvus 기반 벡터 검색
+
+## 검색 파이프라인
+
+```
+Query
+ ├ Dense search (vector)
+ ├ Sparse search (BM25-like)
+ ├ Keyword search (article number)
+ └ RRF Fusion
+      ↓
+   Reranker
+      ↓
+  Score normalize
+      ↓
+  Threshold filtering
+      ↓
+  Final results
+```
+
 ## 시스템 아키텍처
 
 ```
+
 ┌─────────────────┐
-│   Frontend      │  Nuxt.js (Vue 3)
-│   (도서 검색 UI) │
+│ Frontend │ Nuxt.js (Vue 3)
+│ (도서 검색 UI) │
 └────────┬────────┘
-         │
-         │ HTTP/WebSocket
-         │
+│
+│ HTTP/WebSocket
+│
 ┌────────▼────────┐
-│   Gateway       │  Nginx (리버스 프록시)
-│   (포트 90)     │
+│ Gateway │ Nginx (리버스 프록시)
+│ (포트 90) │
 └────────┬────────┘
-         │
-    ┌────┴────┐
-    │         │
-┌───▼──┐  ┌──▼────┐
-│FastAPI│  │ vLLM  │
-│Backend│  │Server │
-└───┬──┘  └───────┘
-    │
+│
+┌────┴────┐
+│ │
+┌───▼──┐ ┌──▼────┐
+│FastAPI│ │ vLLM │
+│Backend│ │Server │
+└───┬──┘ └───────┘
+│
 ┌───▼──────────────┐
-│  Vector Store    │  Milvus (HNSW)
-│  + Embeddings    │  BGE-M3
+│ Vector Store │ Milvus (HNSW)
+│ + Embeddings │ BGE-M3
 └──────────────────┘
+
 ```
+
+===
+
+## 검색 흐름 고도화 최종 목표
+
+```
+
+                 Query
+                   │
+            Query Expansion
+                   │
+        ┌─────────┴─────────┐
+        │                   │
+     Hybrid Search      Graph Search
+        │                   │
+        └─────────┬─────────┘
+                  │
+               Reranker
+                  │
+        Constitution Mapping
+                  │
+            Explanation
+                  │
+               Answer
+
+```
+
+# 1. Graph Search
+
+Country
+
+- code
+- name_ko
+- name_en
+- continent
+
+ConstitutionDocument
+
+- doc_id
+- title
+- version
+- is_bilingual
+- minio_key
+
+Article
+
+- article_id
+- doc_id
+- country_code
+- article_number
+- display_path
+- text_ko
+- text_en
+- page
+- chunk_id
+
+Concept
+
+- name
+- lang
+- normalized_name
+
+## Graph Search 구현 계획
+
+Chunking
+→ Embedding
+→ Milvus insert
+→ MinIO metadata
+→ Graph build
+
+query
+→ hybrid_search
+→ top anchor articles
+→ graph expansion
+→ connected concepts / foreign articles / related articles
+→ rerank or score fusion
+→ final result
+
+### Graph는 벡터 검색을 대체하는 게 아니라, 검색 결과를 구조화하고 확장하는 보강 레이어로 활용
+
+===
 
 ## 주요 컴포넌트
 
