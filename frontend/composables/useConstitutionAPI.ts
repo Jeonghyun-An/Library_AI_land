@@ -4,8 +4,6 @@
  * 백엔드: app/api/comparative_constitution_router.py
  */
 
-import { get } from "http";
-
 export const useConstitutionAPI = () => {
   const config = useRuntimeConfig();
   const apiBase = config.public.apiBase || "http://localhost:8000";
