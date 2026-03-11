@@ -308,7 +308,7 @@
                   class="inn"
                   @click.prevent="
                     searchQuery =
-                      '주요 국가 헌법 \'표현의 자유\' 조항 비교 해줘.';
+                      '국무위원(장관)에 대한 \'해임건의안\'과 \'탄핵소추안\'의 법적 구속력과 절차상 차이는 무엇인가요?';
                     handleSearch();
                   "
                 >
@@ -324,13 +324,12 @@
                   href="#;"
                   class="inn"
                   @click.prevent="
-                    searchQuery =
-                      '국무위원(장관)에 대한 \'해임건의안\'과 \'탄핵소추안\'의 법적 구속력과 절차상 차이는 무엇인가요?';
+                    searchQuery = '헌법 \'비상사태\' 조항 비교 해줘.';
                     handleSearch();
                   "
                 >
                   <div class="item ellipsis line02">
-                    주요 국가 헌법 비상사태 조항 비교 해줘.
+                    헌법 비상사태 조항 비교 해줘.
                   </div>
                   <div class="arr"></div>
                 </a>
@@ -340,12 +339,12 @@
                   href="#;"
                   class="inn"
                   @click.prevent="
-                    searchQuery = '각 국 헌법의 대통령제 조항 비교 해줘.';
+                    searchQuery = '제 11조에 대한 내용 알려줘.';
                     handleSearch();
                   "
                 >
                   <div class="item ellipsis line02">
-                    각 국 헌법의 대통령제 조항 비교 해줘.
+                    제 11조에 대한 내용 알려줘.
                   </div>
                   <div class="arr"></div>
                 </a>
@@ -628,7 +627,7 @@
                       <iframe
                         v-if="koreanPdfUrl"
                         id="korean-pdf-viewer"
-                        :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(koreanPdfUrl)}#page=${koreanPdfPage}#sidebarView=none`"
+                        :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(koreanPdfUrl)}#page=${koreanPdfPage}&sidebarView=none`"
                         class="pdf_iframe"
                         frameborder="0"
                       ></iframe>
@@ -710,7 +709,7 @@
                       <iframe
                         v-if="foreignPdfUrl"
                         id="foreign-pdf-viewer"
-                        :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(foreignPdfUrl)}#page=${foreignPdfPage}`"
+                        :src="`/pdfjs/web/viewer.html?file=${encodeURIComponent(foreignPdfUrl)}#page=${foreignPdfPage}&sidebarView=none`"
                         class="pdf_iframe"
                         frameborder="0"
                       ></iframe>

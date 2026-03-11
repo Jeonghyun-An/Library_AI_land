@@ -1,6 +1,6 @@
 # app/services/hybrid_search_service.py
 """
-하이브리드 검색 서비스 (FULL PATCH v2.1)
+하이브리드 검색 서비스 (FULL PATCH v2.2)
 - Dense(벡터) + Sparse(BM25-like rank) + Keyword(조항번호) → RRF Fusion
 - 점수 정규화:
     raw_score    = re_score(reranker logit) or fusion_score(RRF)  ← 원본, logit 범위 무제한
@@ -8,6 +8,7 @@
     score        = display_score                                  ← ★ threshold 비교용 (0~1 보장)
 - score_threshold는 display_score(0~1) 기준으로 적용
 - Sparse corpus 범위 제한 + doc_type 필터
+- v2.2: article_number_filter 추가 - exact 조항 검색 시 dense/sparse도 해당 조항만 검색
 """
 
 from __future__ import annotations
@@ -199,6 +200,8 @@ def hybrid_search(
     dense_weight: float = 0.5,
     sparse_weight: float = 0.3,
     keyword_weight: float = 0.2,
+    # v2.2 추가: exact 조항 번호 필터 (한국 헌법 "제N조" 검색 시 사용)
+    article_number_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     하이브리드 검색 메인 함수
@@ -209,6 +212,11 @@ def hybrid_search(
     - score        : display_score와 동일 (★ threshold 비교는 반드시 이 값으로)
 
     score_threshold는 display_score(0~1) 기준으로 적용됩니다.
+
+    v2.2 추가:
+    - article_number_filter: "제N조" 검색 시 dense/sparse/keyword 모두 해당 조항만 검색
+      → Milvus expr에 metadata["article_number"] == "N" 조건 추가
+      → 일반 hybrid 모드와 달리 exact 필터가 검색 공간 자체를 제한함
     """
 
     # ---------- 필터 expr 구성 ----------
@@ -217,6 +225,13 @@ def hybrid_search(
         expr_parts.append(f'metadata["doc_type"] == "{doc_type_filter}"')
     if country_filter:
         expr_parts.append(f'metadata["country"] == "{country_filter}"')
+
+    # v2.2: article_number_filter가 있으면 dense/sparse 검색 공간도 해당 조항으로 제한
+    # exact_article 모드: 벡터 유사도보다 조항 번호 일치가 우선
+    if article_number_filter:
+        expr_parts.append(f'metadata["article_number"] == "{article_number_filter}"')
+        print(f"[HYBRID] EXACT ARTICLE MODE: article_number={article_number_filter}")
+
     expr = " && ".join(expr_parts) if expr_parts else None
 
     # ---------- Dense (벡터 검색) ----------
@@ -279,10 +294,17 @@ def hybrid_search(
     print(f"[HYBRID] Sparse: {len(sparse)} results")
 
     # ---------- Keyword (조항번호) 검색 ----------
+    # article_number_filter가 이미 있으면 그 번호로, 없으면 쿼리에서 추출
     keyword = []
-    article_nums = extract_article_numbers(query)
-    if article_nums:
-        for num in article_nums:
+    if article_number_filter:
+        # exact 모드: 지정된 조항 번호로 직접 검색 (이미 dense/sparse에 필터 적용됨)
+        # keyword 채널에는 가중치를 높여 해당 조항을 더 강하게 부스팅
+        article_nums_to_search = [article_number_filter]
+    else:
+        article_nums_to_search = extract_article_numbers(query)
+
+    if article_nums_to_search:
+        for num in article_nums_to_search:
             expr_kw_parts = []
             if doc_type_filter:
                 expr_kw_parts.append(f'metadata["doc_type"] == "{doc_type_filter}"')
@@ -312,13 +334,24 @@ def hybrid_search(
     print(f"[HYBRID] Keyword: {len(keyword)} results")
 
     # ---------- RRF Fusion ----------
+    # exact_article 모드: keyword weight를 대폭 높여 조항 번호 일치를 우선시
+    if article_number_filter:
+        effective_dense_weight = 0.2
+        effective_sparse_weight = 0.1
+        effective_keyword_weight = 0.7
+        print(f"[HYBRID] EXACT ARTICLE: weights adjusted → dense=0.2, sparse=0.1, keyword=0.7")
+    else:
+        effective_dense_weight = dense_weight
+        effective_sparse_weight = sparse_weight
+        effective_keyword_weight = keyword_weight
+
     fused = rrf_fusion(
         dense_results=dense,
         sparse_results=sparse,
         keyword_results=keyword,
-        dense_weight=dense_weight,
-        sparse_weight=sparse_weight,
-        keyword_weight=keyword_weight,
+        dense_weight=effective_dense_weight,
+        sparse_weight=effective_sparse_weight,
+        keyword_weight=effective_keyword_weight,
         k=60,
     )
     print(f"[HYBRID] Fused: {len(fused)} results")

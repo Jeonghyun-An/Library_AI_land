@@ -21,7 +21,7 @@ from fastapi.responses import Response, StreamingResponse
 import httpx
 from pydantic import BaseModel, Field
 import fitz  # PyMuPDF
-
+from app.services.constitution_search_optimizer import ConstitutionSearchOptimizer
 from app.services.country_registry import Country
 from app.services.embedding_model import get_embedding_model
 from app.services.milvus_service import get_milvus_client, get_collection
@@ -172,6 +172,8 @@ class ComparativeSearchResponse(BaseModel):
     summary: Optional[str] = None
     search_time_ms: float
     search_id: Optional[str] = None
+    search_strategy: Optional[str] = None
+    article_filters: Optional[List[str]] = None
 
 
 class PairSummaryCountryPack(BaseModel):
@@ -834,6 +836,7 @@ async def _index_constitution_background(
             is_bilingual=is_bilingual,
             chunk_granularity=chunk_granularity,
         )
+        print(f"[DEBUG] chunk[0].structure = {chunks[0].structure if chunks else 'empty'}")
 
         print(f"[CONSTITUTION] Generated {len(chunks)} chunks")
 
@@ -923,13 +926,18 @@ async def _index_constitution_background(
                 if v and len(v) > MILVUS_TEXT_MAX:
                     print(f"[WARNING] {chunk.doc_id} {key} 길이 {len(v)} 초과 → {MILVUS_TEXT_MAX}자로 제한")
                     d[key] = v[:MILVUS_TEXT_MAX]
+            structure = d.get("structure") or {}
+            if isinstance(structure, dict):
+                for k, v in structure.items():
+                    if v is not None and k not in d:
+                        d[k] = str(v)  # str 변환: Milvus JSON expr은 문자열 비교
             return d
         
         metadatas = [_build_meta(chunk) for chunk in chunks]
 
         # ===== 메타데이터 강화 =====
         now_iso = datetime.utcnow().isoformat()
-        for meta in metadatas:
+        for meta, chunk in zip(metadatas, chunks):
             # meta는 dict여야 함
             if not isinstance(meta, dict):
                 meta = {"raw": _json_safe(meta)}
@@ -937,6 +945,10 @@ async def _index_constitution_background(
             meta["minio_key"] = minio_key
             meta["minio_bucket"] = os.getenv("MINIO_BUCKET", "library-bucket")
             meta["doc_type"] = "constitution"
+            if chunk.structure and isinstance(chunk.structure, dict):
+                article_no = chunk.structure.get("article_number")
+                if article_no is not None:
+                    meta["article_number"] = str(article_no)
             meta.update(country_meta)
             meta["constitution_version"] = version
             meta["constitution_title"] = title
@@ -963,6 +975,11 @@ async def _index_constitution_background(
             # structure 안전장치: dict 보장
             if not isinstance(meta.get("structure"), dict):
                 meta["structure"] = {}
+            structure = meta.get("structure") or {}
+            if isinstance(structure, dict):
+                for k, v in structure.items():
+                    if v is not None and k not in meta:
+                        meta[k] = str(v)
 
         print(f"[CONSTITUTION] Total chunks to insert: {len(chunks)}")
 
@@ -1691,6 +1708,21 @@ async def comparative_search(request: ComparativeSearchRequest):
         os.getenv("MILVUS_COLLECTION", "library_books"),
         dim=1024
     )
+    # ========== v2.2 추가: 쿼리 분석 (exact_article 전략 감지) ==========
+    optimizer = ConstitutionSearchOptimizer()
+    query_analysis = optimizer.optimize_query(request.query, lang="ko")
+    search_strategy = query_analysis.get('search_strategy', 'hybrid')
+    article_filters = query_analysis.get('article_filters', [])
+
+    print(f"[SEARCH] strategy={search_strategy}, article_filters={article_filters}, query={request.query!r}")
+    
+    # 단일 조항("제10조")이면 exact 필터, 복수면 hybrid fallback
+    article_number_filter: Optional[str] = None
+    if search_strategy == 'exact_article' and len(article_filters) == 1:
+        article_number_filter = article_filters[0]
+        print(f"[SEARCH] EXACT ARTICLE MODE: 제{article_number_filter}조")
+    elif search_strategy == 'multi_article':
+        print(f"[SEARCH] MULTI-ARTICLE MODE: {article_filters} → hybrid fallback")
 
     # ========== 1. 한국 헌법 검색 ==========
     korean_results_raw = hybrid_search(
@@ -1704,6 +1736,7 @@ async def comparative_search(request: ComparativeSearchRequest):
         score_threshold=0.0,
         min_results=1,
         doc_type_filter="constitution",
+        article_number_filter=article_number_filter,
     )
 
     # ConstitutionArticleResult로 변환
@@ -1741,7 +1774,9 @@ async def comparative_search(request: ComparativeSearchRequest):
         )
         korean_results.append(result)
     KOREAN_SCORE_THRESHOLD = float(os.getenv("KOREAN_SCORE_THRESHOLD", "0.05"))
-        
+    if article_number_filter:
+        KOREAN_SCORE_THRESHOLD = 0.0
+        print(f"[KOREAN_FILTER] EXACT MODE: threshold=0.0 강제 적용")
         # score 기준으로 정렬 (높은 순)
     korean_results = sorted(korean_results, key=lambda x: x.score, reverse=True)
         
@@ -1928,7 +1963,9 @@ async def comparative_search(request: ComparativeSearchRequest):
         pairs=pairs,
         summary=summary,
         search_time_ms=elapsed,
-        search_id=search_id
+        search_id=search_id,
+        search_strategy=search_strategy,
+        article_filters=article_filters if article_filters else None,
     )
 
 def build_pair_summary_prompt(
