@@ -37,6 +37,11 @@ from app.api.models.comparative_match import (
 from app.services.comparative_match_service import match_foreign_by_korean
 from app.services.hybrid_search_service import hybrid_search, match_foreign_to_korean
 from app.services.comparative_cache import set_search_cache
+from app.services.graph_builder import (
+    build_constitution_graph,
+    save_comparative_pairs_to_graph,
+)
+from app.services.graph_rag_service import match_foreign_to_korean_with_graph
 
 router = APIRouter(prefix="/api/constitution", tags=["comparative-constitution"])
 # ==================== 국가-대륙 매핑 ====================
@@ -101,35 +106,33 @@ def get_continent(country_code: str) -> str:
 
 class ConstitutionArticleResult(BaseModel):
     """헌법 조항 검색 결과"""
-    # 기본 정보
     country: str
     country_name: str
     constitution_title: str
 
-    # 계층 구조
     display_path: str
     structure: Dict[str, Any]
 
-    # 텍스트
     english_text: Optional[str] = None
     korean_text: Optional[str] = None
     text_type: str
     has_english: bool
     has_korean: bool
 
-    # 검색 점수
     raw_score: Optional[float] = None
     score: float
     display_score: float
 
-    # 페이지
+    # Graph RAG 추가 필드
+    graph_score: Optional[float] = None
+    graph_evidence: Dict[str, Any] = Field(default_factory=dict)
+
     page: int
     page_english: Optional[int] = None
     page_korean: Optional[int] = None
 
-    # 하이라이트용 bbox
     bbox_info: List[Dict[str, Any]] = Field(default_factory=list)
-    paragraph_bbox_info: Dict[str, List[Dict[str, Any]]] = {}
+    paragraph_bbox_info: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
     continent: str = Field(default="asia", description="대륙 정보")
     version: Optional[str] = Field(None, description="버전/개정일")
     is_bilingual: bool = Field(False, description="이중언어 여부")
@@ -149,11 +152,18 @@ class ComparativeSearchRequest(BaseModel):
     query: str
     korean_top_k: int = 5
     korean_score_threshold: float = 0.2
-    foreign_per_country: int = 3   # 국가당 처음 보여줄 조항 수
-    foreign_pool_size: int = 50    # 국가별 후보 풀
+    foreign_per_country: int = 3
+    foreign_pool_size: int = 50
     target_country: Optional[str] = None
-    cursor_map: Optional[Dict[str, int]] = None  # {"AT": 3, "DE": 6}
+    cursor_map: Optional[Dict[str, int]] = None
     generate_summary: bool = True
+
+    # Graph RAG 옵션
+    use_graph: bool = True
+    graph_top_k_per_korean: int = 50
+    graph_candidate_limit: int = 80
+    graph_rerank_weight: float = 0.75
+    graph_weight: float = 0.25
 
 
 class CountryPagedResult(BaseModel):
@@ -1083,6 +1093,30 @@ async def _index_constitution_background(
         )
 
         print(f"[CONSTITUTION] Metadata saved to: {metadata_key}")
+        # 5. Graph 저장
+        try:
+            print(f"[CONSTITUTION] Step 5: Building constitution graph...")
+
+            build_constitution_graph(
+                doc_id=doc_id,
+                country_code=country,
+                country_name_ko=country_info.name_ko if country_info else country,
+                country_name_en=country_info.name_en if country_info else country,
+                continent=country_info.continent if country_info else "unknown",
+                region=country_info.region if country_info else "unknown",
+                title=title,
+                version=version,
+                is_bilingual=is_bilingual,
+                minio_key=minio_key,
+                chunks=chunks,
+            )
+
+            print(f"[CONSTITUTION] Graph build completed: {doc_id}")
+
+        except Exception as graph_error:
+            print(f"[CONSTITUTION] Graph build failed (non-fatal): {graph_error}")
+            import traceback
+            traceback.print_exc()
         print(f"[CONSTITUTION] Indexing completed successfully: {doc_id}")
 
     except Exception as e:
@@ -1366,7 +1400,12 @@ async def delete_constitution(doc_id: str):
         
         if deleted_items["milvus_chunks"] == 0 and not deleted_items["minio_pdf"]:
             raise HTTPException(404, f"문서를 찾을 수 없습니다: {doc_id}")
-        
+        try:
+            from app.services.graph_service import delete_document_graph
+            delete_document_graph(doc_id)
+            print(f"[GRAPH] Deleted document graph: {doc_id}")
+        except Exception as e:
+            print(f"[GRAPH] Graph delete failed (non-fatal): {e}")
         return {
             "success": True,
             "doc_id": doc_id,
@@ -1694,13 +1733,14 @@ def _build_pairs_optimized(
 async def comparative_search(request: ComparativeSearchRequest):
     """
     비교 헌법 검색
-    
-    1. 한국 헌법 검색 (top_k개)
-    2. 외국 헌법 풀 검색 (pool_size개)
-    3. 한국 조항별로 외국 조항 매칭
-    4. 점수 정규화 (raw_score, score, display_score)
+
+    1. 한국 헌법 검색
+    2. 외국 헌법 후보 풀 검색
+    3. Graph-aware foreign matching
+    4. 국가별 페이징
+    5. 요약 생성
+    6. Graph compare relation 저장
     """
-    import time
     start = time.time()
 
     emb_model = get_embedding_model()
@@ -1708,28 +1748,29 @@ async def comparative_search(request: ComparativeSearchRequest):
         os.getenv("MILVUS_COLLECTION", "library_books"),
         dim=1024
     )
-    # ========== v2.2 추가: 쿼리 분석 (exact_article 전략 감지) ==========
+
     optimizer = ConstitutionSearchOptimizer()
     query_analysis = optimizer.optimize_query(request.query, lang="ko")
-    search_strategy = query_analysis.get('search_strategy', 'hybrid')
-    article_filters = query_analysis.get('article_filters', [])
+    search_strategy = query_analysis.get("search_strategy", "hybrid")
+    article_filters = query_analysis.get("article_filters", [])
 
     print(f"[SEARCH] strategy={search_strategy}, article_filters={article_filters}, query={request.query!r}")
-    
-    # 단일 조항("제10조")이면 exact 필터, 복수면 hybrid fallback
+
     article_number_filter: Optional[str] = None
-    if search_strategy == 'exact_article' and len(article_filters) == 1:
+    if search_strategy == "exact_article" and len(article_filters) == 1:
         article_number_filter = article_filters[0]
         print(f"[SEARCH] EXACT ARTICLE MODE: 제{article_number_filter}조")
-    elif search_strategy == 'multi_article':
+    elif search_strategy == "multi_article":
         print(f"[SEARCH] MULTI-ARTICLE MODE: {article_filters} → hybrid fallback")
 
-    # ========== 1. 한국 헌법 검색 ==========
+    # =========================================================
+    # 1. 한국 헌법 검색
+    # =========================================================
     korean_results_raw = hybrid_search(
         query=request.query,
         collection=collection,
         embedding_model=emb_model,
-        top_k=max(request.korean_top_k * 3, 15),  # 후처리에서 필터링할 예정이므로 여유 있게
+        top_k=max(request.korean_top_k * 3, 15),
         initial_retrieve=150,
         country_filter="KR",
         use_reranker=True,
@@ -1739,70 +1780,72 @@ async def comparative_search(request: ComparativeSearchRequest):
         article_number_filter=article_number_filter,
     )
 
-    # ConstitutionArticleResult로 변환
-    korean_results = []
+    korean_results: List[ConstitutionArticleResult] = []
+
     for item in korean_results_raw:
-        meta_raw = item.get('metadata', {})
+        meta_raw = item.get("metadata", {})
         meta = _ensure_meta_dict(meta_raw)
-        doc_id = meta.get('doc_id') or meta.get('constitution_doc_id')
-        
+        doc_id = meta.get("doc_id") or meta.get("constitution_doc_id")
+
         result = ConstitutionArticleResult(
-            country=meta.get('country', 'KR'),
-            country_name=meta.get('country_name', '대한민국'),
-            constitution_title=meta.get('constitution_title', '대한민국헌법'),
-            display_path=meta.get('display_path', ''),
+            country=meta.get("country", "KR"),
+            country_name=meta.get("country_name", "대한민국"),
+            constitution_title=meta.get("constitution_title", "대한민국헌법"),
+            display_path=meta.get("display_path", ""),
             structure={
-                **(meta.get('structure', {}) if isinstance(meta.get('structure'), dict) else {}),
-                'doc_id': doc_id
+                **(meta.get("structure", {}) if isinstance(meta.get("structure"), dict) else {}),
+                "doc_id": doc_id
             },
-            english_text=meta.get('english_text'),
-            korean_text=meta.get('korean_text'),
-            text_type=meta.get('text_type', 'korean_only'),
-            has_english=bool(meta.get('has_english', False)),
-            has_korean=bool(meta.get('has_korean', True)),
-            
-            # 점수 3가지
-            raw_score=float(item.get('raw_score', 0.0)),
-            score=float(item.get('score', item.get('display_score', 0.0))),
-            display_score=float(item.get('display_score', 0.0)),
-            
-            page=int(meta.get('page', 1) or 1),
-            page_english=meta.get('page_english'),
-            page_korean=meta.get('page_korean'),
-            bbox_info=meta.get('bbox_info', []) if isinstance(meta.get('bbox_info'), list) else [],
-            continent=get_continent(meta.get('country', 'KR'))
+            english_text=meta.get("english_text"),
+            korean_text=meta.get("korean_text"),
+            text_type=meta.get("text_type", "korean_only"),
+            has_english=bool(meta.get("has_english", False)),
+            has_korean=bool(meta.get("has_korean", True)),
+            raw_score=float(item.get("raw_score", 0.0)),
+            score=float(item.get("score", item.get("display_score", 0.0))),
+            display_score=float(item.get("display_score", 0.0)),
+            graph_score=None,
+            graph_evidence={},
+            page=int(meta.get("page", 1) or 1),
+            page_english=meta.get("page_english"),
+            page_korean=meta.get("page_korean"),
+            bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else [],
+            paragraph_bbox_info=meta.get("paragraph_bbox_info", {}) if isinstance(meta.get("paragraph_bbox_info"), dict) else {},
+            continent=get_continent(meta.get("country", "KR")),
         )
         korean_results.append(result)
+
     KOREAN_SCORE_THRESHOLD = float(os.getenv("KOREAN_SCORE_THRESHOLD", "0.05"))
     if article_number_filter:
         KOREAN_SCORE_THRESHOLD = 0.0
         print(f"[KOREAN_FILTER] EXACT MODE: threshold=0.0 강제 적용")
-        # score 기준으로 정렬 (높은 순)
+
     korean_results = sorted(korean_results, key=lambda x: x.score, reverse=True)
-        
-    # threshold 이상만 필터링
+
     filtered_korean = [
-        kr for kr in korean_results 
+        kr for kr in korean_results
         if kr.score >= KOREAN_SCORE_THRESHOLD
     ]
-    
-    # 필터링 결과가 0개면 최소 1개는 보장
+
     if not filtered_korean and korean_results:
         filtered_korean = korean_results[:3]
-        print(f"[KOREAN_FILTER] 모든 조항이 threshold({KOREAN_SCORE_THRESHOLD}) 미만 - 최고점만 유지: {filtered_korean[0].display_path} (score: {filtered_korean[0].score:.3f})")
+        print(
+            f"[KOREAN_FILTER] 모든 조항이 threshold({KOREAN_SCORE_THRESHOLD}) 미만 - 최고점만 유지: "
+            f"{filtered_korean[0].display_path} (score: {filtered_korean[0].score:.3f})"
+        )
     else:
         removed_count = len(korean_results) - len(filtered_korean)
         if removed_count > 0:
             print(f"[KOREAN_FILTER] {removed_count}개 조항 제거 (threshold: {KOREAN_SCORE_THRESHOLD})")
             print(f"[KOREAN_FILTER] 유지된 조항: {[kr.display_path for kr in filtered_korean]}")
             print(f"[KOREAN_FILTER] 점수: {[f'{kr.score:.3f}' for kr in filtered_korean]}")
-    
-    # request.korean_top_k 제한
+
     korean_results = filtered_korean[:request.korean_top_k]
-    
     print(f"[KOREAN_FILTER] 최종 한국 조항 수: {len(korean_results)}")
 
-    # ========== 2. 외국 헌법 풀 검색 ==========
+    # =========================================================
+    # 2. 외국 헌법 후보 풀 검색
+    # =========================================================
     foreign_pool_raw = hybrid_search(
         query=request.query,
         collection=collection,
@@ -1810,153 +1853,184 @@ async def comparative_search(request: ComparativeSearchRequest):
         top_k=request.foreign_pool_size,
         initial_retrieve=200,
         country_filter=request.target_country,
-        use_reranker=False,  # 매칭 시 수행
+        use_reranker=False,   # Graph matching에서 처리
         doc_type_filter="constitution",
     )
-    
-    # KR 제외
+
     if not request.target_country:
         foreign_pool_raw = [
-            r for r in foreign_pool_raw 
-            if r.get('metadata', {}).get('country') != 'KR'
+            r for r in foreign_pool_raw
+            if _ensure_meta_dict(r.get("metadata", {})).get("country") != "KR"
         ]
 
-    # 검색 캐시 저장 (재매칭용)
+    # 검색 캐시 저장
     search_id = hashlib.md5(f"{request.query}_{start}".encode()).hexdigest()[:16]
     set_search_cache(search_id, foreign_pool_raw)
 
-    # ========== 3. 한국 조항별 매칭 ==========
+    # =========================================================
+    # 3. 한국 anchor 준비
+    # =========================================================
     korean_chunks = []
-    for kr in korean_results:
-        korean_chunks.append({
-            'chunk_id': kr.structure.get('doc_id', f"kr_{kr.structure.get('article_number')}"),
-            'chunk': kr.korean_text or kr.english_text or '',
-            'metadata': {
-                'country': kr.country,
-                'article_number': kr.structure.get('article_number'),
-                'display_path': kr.display_path
-            },
-            'original': kr
-        })
-    
-    matched = match_foreign_to_korean(
-        korean_chunks=korean_chunks,
-        foreign_pool=foreign_pool_raw,
-        top_k_per_korean=50,
-        use_reranker=True
-    )
+    for idx, kr in enumerate(korean_results):
+        article_num = (kr.structure or {}).get("article_number")
+        doc_id = (kr.structure or {}).get("doc_id") or f"kr_{idx}"
+        paragraph = (kr.structure or {}).get("paragraph")
+        version = (kr.structure or {}).get("constitution_version")
 
-    # ========== 4. Pair 생성 ==========
+        korean_chunks.append({
+            "chunk_id": f"{doc_id}:{article_num or idx}:{paragraph or ''}",
+            "chunk": kr.korean_text or kr.english_text or "",
+            "metadata": {
+                "country": kr.country,
+                "country_name": kr.country_name,
+                "constitution_title": kr.constitution_title,
+                "display_path": kr.display_path,
+                "article_number": article_num,
+                "paragraph": paragraph,
+                "constitution_version": version,
+                "structure": kr.structure or {},
+            },
+            "original": kr,
+        })
+
+    # =========================================================
+    # 4. Graph-aware foreign matching
+    # =========================================================
+    if request.use_graph:
+        matched = match_foreign_to_korean_with_graph(
+            query=request.query,
+            korean_chunks=korean_chunks,
+            foreign_pool=foreign_pool_raw,
+            top_k_per_korean=request.graph_top_k_per_korean,
+            target_country=request.target_country,
+            candidate_limit=request.graph_candidate_limit,
+            rerank_weight=request.graph_rerank_weight,
+            graph_weight=request.graph_weight,
+        )
+    else:
+        matched = match_foreign_to_korean(
+            korean_chunks=korean_chunks,
+            foreign_pool=foreign_pool_raw,
+            top_k_per_korean=request.graph_top_k_per_korean,
+            use_reranker=True,
+        )
+
+    # =========================================================
+    # 5. Pair 생성
+    # =========================================================
     cursor_map = request.cursor_map or {}
-    pairs = []
-    
+    pairs: List[ComparativePairResult] = []
+
     for kr_chunk in korean_chunks:
-        kr = kr_chunk['original']
-        kr_id = kr_chunk['chunk_id']
-        
-        # 매칭된 외국 조항들
+        kr = kr_chunk["original"]
+        kr_id = kr_chunk["chunk_id"]
+
         foreign_matches = matched.get(kr_id, [])
-        
-        # ConstitutionArticleResult로 변환
-        foreign_articles = []
+        foreign_articles: List[ConstitutionArticleResult] = []
+
         for item in foreign_matches:
-            meta_raw = item.get('metadata', {})
+            meta_raw = item.get("metadata", {})
             meta = _ensure_meta_dict(meta_raw)
-            doc_id = meta.get('doc_id')
-            
+            doc_id = meta.get("doc_id")
+
             article = ConstitutionArticleResult(
                 country=meta.get("country", ""),
                 country_name=meta.get("country_name", ""),
                 constitution_title=meta.get("constitution_title", ""),
                 display_path=meta.get("display_path", ""),
                 structure={
-                    **(meta.get('structure', {}) if isinstance(meta.get('structure'), dict) else {}),
-                    'doc_id': doc_id
+                    **(meta.get("structure", {}) if isinstance(meta.get("structure"), dict) else {}),
+                    "doc_id": doc_id
                 },
                 english_text=meta.get("english_text"),
                 korean_text=meta.get("korean_text"),
                 text_type=meta.get("text_type", "english_only"),
                 has_english=bool(meta.get("has_english", False)),
                 has_korean=bool(meta.get("has_korean", False)),
-                
-                # 점수 3가지
-                raw_score=float(item.get('raw_score', 0.0)),
-                score=float(item.get('score', 0.0)),
-                display_score=float(item.get('display_score', 0.0)),
-                
+                raw_score=float(item.get("raw_score", item.get("final_score", 0.0))),
+                score=float(item.get("score", item.get("display_score", 0.0))),
+                display_score=float(item.get("display_score", 0.0)),
+                graph_score=float(item.get("graph_score", 0.0)) if item.get("graph_score") is not None else None,
+                graph_evidence=item.get("graph_evidence", {}) if isinstance(item.get("graph_evidence"), dict) else {},
                 page=int(meta.get("page", 1) or 1),
                 page_english=meta.get("page_english"),
                 page_korean=meta.get("page_korean"),
                 bbox_info=meta.get("bbox_info", []) if isinstance(meta.get("bbox_info"), list) else [],
                 paragraph_bbox_info=meta.get("paragraph_bbox_info", {}) if isinstance(meta.get("paragraph_bbox_info"), dict) else {},
-                continent=get_continent(meta.get("country", ""))
+                continent=get_continent(meta.get("country", "")),
             )
             foreign_articles.append(article)
-        
-        # 중복 제거 및 국가별 그룹화
+
         foreign_articles = _dedupe_articles(foreign_articles)
         by_country = _group_by_country(foreign_articles)
-        
-        # 국가별 페이징
-        foreign_block = {}
+
+        foreign_block: Dict[str, CountryPagedResult] = {}
         for country, items in by_country.items():
             start_idx = cursor_map.get(country, 0)
             sliced, next_cursor = _paginate(items, start_idx, request.foreign_per_country)
-            
             foreign_block[country] = CountryPagedResult(
                 items=sliced,
                 next_cursor=next_cursor
             )
-        
+
         pairs.append(
             ComparativePairResult(
                 korean=kr,
                 foreign=foreign_block
             )
         )
-    # ========== 5. 요약 생성 ==========
+
+    # =========================================================
+    # 6. 요약 생성
+    # =========================================================
     summary = None
     if request.generate_summary and pairs:
         try:
-            print(f"[SUMMARY] 요약 생성 시작...")
-            
-            # 첫 번째 pair의 한국 조항
+            print("[SUMMARY] 요약 생성 시작...")
+
             first_pair = pairs[0]
             korean_item = first_pair.korean
-            
-            # 각 국가의 첫 번째 조항만 사용
+
             foreign_by_country = {}
             for country_code, paged_result in first_pair.foreign.items():
                 if paged_result.items:
                     foreign_by_country[country_code] = PairSummaryCountryPack(
-                        items=[paged_result.items[0]]  # 첫 번째만
+                        items=[paged_result.items[0]]
                     )
-            
+
             if foreign_by_country:
-                # 프롬프트 생성
                 prompt = build_pair_summary_prompt(
                     query=request.query,
                     korean_item=korean_item,
                     foreign_by_country=foreign_by_country
                 )
-                
-                # LLM 호출
                 summary = await _call_vllm_completion(
                     prompt=prompt,
                     max_tokens=512,
                     temperature=0.3
                 )
-                
                 print(f"[SUMMARY] 요약 생성 완료: {len(summary)} chars")
             else:
-                print(f"[SUMMARY] 외국 조항이 없어 요약 생략")
-        
+                print("[SUMMARY] 외국 조항이 없어 요약 생략")
+
         except Exception as e:
             print(f"[SUMMARY] 요약 생성 실패: {e}")
             import traceback
             traceback.print_exc()
-            # 요약 실패해도 검색 결과는 반환
-    elapsed = (time.time() - start) * 1000
+
+    # =========================================================
+    # 7. Graph 비교 관계 저장
+    # =========================================================
+    try:
+        save_comparative_pairs_to_graph(
+            query=request.query,
+            pairs=pairs,
+        )
+        print("[GRAPH] Comparative pair relations saved")
+    except Exception as e:
+        print(f"[GRAPH] Comparative relation save failed (non-fatal): {e}")
+
+    elapsed = (time.time() - start) * 1000.0
 
     return ComparativeSearchResponse(
         query=request.query,
@@ -1967,7 +2041,6 @@ async def comparative_search(request: ComparativeSearchRequest):
         search_strategy=search_strategy,
         article_filters=article_filters if article_filters else None,
     )
-
 def build_pair_summary_prompt(
     query: str,
     korean_item: ConstitutionArticleResult,
